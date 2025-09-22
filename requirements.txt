@@ -14,7 +14,6 @@ langchain-community==0.2.12
 motor==3.5.1  # Async MongoDB driver
 pymongo==4.8.0
 redis==5.0.8
-sqlite3  # Built-in with Python
 pinecone-client==3.2.2
 
 # WhatsApp/Twilio integration
