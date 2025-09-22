@@ -4,56 +4,40 @@ RAG Agent - Retrieval Augmented Generation for healthcare knowledge.
 import logging
 from typing import List, Dict, Any, Optional, Tuple
 from crewai import Agent, Task
-from crewai.tools import BaseTool
 import json
 
 from ..services.pinecone_service import pinecone_service
-from config.settings import settings
+from ..config.settings import settings
 
 logger = logging.getLogger(__name__)
 
 
-class HealthcareRAGTool(BaseTool):
-    """Tool for retrieving healthcare information from knowledge base."""
-    
-    name: str = "healthcare_knowledge_retriever"
-    description: str = "Retrieves relevant healthcare information from medical knowledge base and user documents"
-    
-    def _run(self, query: str, user_id: Optional[str] = None, top_k: int = 5) -> str:
-        """Retrieve relevant healthcare information."""
-        try:
-            # This would be implemented with actual Pinecone search
-            results = f"Retrieved {top_k} relevant documents for query: {query}"
-            if user_id:
-                results += f" for user: {user_id}"
-            return results
-        except Exception as e:
-            return f"Error retrieving information: {str(e)}"
+def healthcare_knowledge_retriever(query: str, user_id: Optional[str] = None, top_k: int = 5) -> str:
+    """Retrieves relevant healthcare information from medical knowledge base and user documents."""
+    try:
+        # This would be implemented with actual Pinecone search
+        results = f"Retrieved {top_k} relevant documents for query: {query}"
+        if user_id:
+            results += f" for user: {user_id}"
+        return results
+    except Exception as e:
+        return f"Error retrieving information: {str(e)}"
 
 
-class UserDocumentTool(BaseTool):
-    """Tool for retrieving user-specific medical documents."""
-    
-    name: str = "user_document_retriever"
-    description: str = "Retrieves information from user's uploaded medical documents and reports"
-    
-    def _run(self, query: str, user_id: str, top_k: int = 3) -> str:
-        """Retrieve relevant information from user documents."""
-        try:
-            # This would search user's document namespace in Pinecone
-            return f"Retrieved user documents for {user_id} matching: {query}"
-        except Exception as e:
-            return f"Error retrieving user documents: {str(e)}"
+def user_document_retriever(query: str, user_id: str, top_k: int = 3) -> str:
+    """Retrieves information from user's uploaded medical documents and reports."""
+    try:
+        # This would search user's document namespace in Pinecone
+        return f"Retrieved user documents for {user_id} matching: {query}"
+    except Exception as e:
+        return f"Error retrieving user documents: {str(e)}"
 
 
 class RAGAgent:
     """Retrieval Augmented Generation agent for healthcare knowledge."""
     
     def __init__(self):
-        self.tools = [
-            HealthcareRAGTool(),
-            UserDocumentTool()
-        ]
+        self.tools = []
         
         self.agent = Agent(
             role="Healthcare Knowledge Specialist",

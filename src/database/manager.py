@@ -7,7 +7,7 @@ from typing import Optional
 from ..database.mongodb import MongoDB, UserRepository, MedicalDocumentRepository
 from ..database.sqlite import SQLiteDB, ChatRepository, SessionRepository
 from ..database.redis_cache import RedisCache, FAQCache, UserCache
-from config.settings import settings
+from ..config.settings import settings
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +76,10 @@ class DatabaseManager:
             
         except Exception as e:
             logger.error(f"Error during database cleanup: {e}")
+    
+    async def close(self):
+        """Alias for cleanup method."""
+        await self.cleanup()
 
 
 # Global database manager instance

@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 import httpx
 from datetime import datetime
 
-from config.settings import settings
+from ..config.settings import settings
 from ..models.schemas import WhatsAppMessage
 
 logger = logging.getLogger(__name__)

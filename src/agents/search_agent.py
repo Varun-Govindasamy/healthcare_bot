@@ -4,57 +4,41 @@ Search Agent - Real-time outbreak and disease information using Serper API.
 import logging
 from typing import List, Dict, Any, Optional
 from crewai import Agent, Task
-from crewai.tools import BaseTool
 import httpx
 import json
 from datetime import datetime
 
-from config.settings import settings
+from ..config.settings import settings
 
 logger = logging.getLogger(__name__)
 
 
-class OutbreakSearchTool(BaseTool):
-    """Tool for searching disease outbreak information."""
-    
-    name: str = "outbreak_searcher"
-    description: str = "Searches for current disease outbreaks and health alerts in specific locations"
-    
-    def _run(self, disease: str, location: str, timeframe: str = "recent") -> str:
-        """Search for disease outbreaks in specific location."""
-        try:
-            query = f"{disease} outbreak {location} {timeframe}"
-            # This would use Serper API in practice
-            return f"Searched for: {query}"
-        except Exception as e:
-            return f"Error searching for outbreaks: {str(e)}"
+def outbreak_searcher(disease: str, location: str, timeframe: str = "recent") -> str:
+    """Searches for current disease outbreaks and health alerts in specific locations."""
+    try:
+        query = f"{disease} outbreak {location} {timeframe}"
+        # This would use Serper API in practice
+        return f"Searched for: {query}"
+    except Exception as e:
+        return f"Error searching for outbreaks: {str(e)}"
 
 
-class HealthNewsSearchTool(BaseTool):
-    """Tool for searching health news and updates."""
-    
-    name: str = "health_news_searcher"
-    description: str = "Searches for latest health news and medical updates"
-    
-    def _run(self, query: str, location: Optional[str] = None) -> str:
-        """Search for health news and updates."""
-        try:
-            search_query = f"health news {query}"
-            if location:
-                search_query += f" {location}"
-            return f"Searched health news for: {search_query}"
-        except Exception as e:
-            return f"Error searching health news: {str(e)}"
+def health_news_searcher(query: str, location: Optional[str] = None) -> str:
+    """Searches for latest health news and medical updates."""
+    try:
+        search_query = f"health news {query}"
+        if location:
+            search_query += f" {location}"
+        return f"Searched health news for: {search_query}"
+    except Exception as e:
+        return f"Error searching health news: {str(e)}"
 
 
 class SearchAgent:
     """Agent for real-time health information and outbreak searches."""
     
     def __init__(self):
-        self.tools = [
-            OutbreakSearchTool(),
-            HealthNewsSearchTool()
-        ]
+        self.tools = []
         
         self.agent = Agent(
             role="Health Information Researcher",

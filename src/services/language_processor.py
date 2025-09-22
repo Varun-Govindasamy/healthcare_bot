@@ -6,7 +6,7 @@ from typing import Optional, Dict, Any, Tuple
 import re
 from openai import AsyncOpenAI
 
-from config.settings import settings
+from ..config.settings import settings
 
 logger = logging.getLogger(__name__)
 

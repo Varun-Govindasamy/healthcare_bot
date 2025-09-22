@@ -3,8 +3,7 @@ Medical Data Agent - Handles onboarding and medical document processing.
 """
 import logging
 from typing import Dict, Any, List, Optional
-from crewai import Agent, Task, Tool
-from crewai.tools import BaseTool
+from crewai import Agent, Task
 from pydantic import BaseModel, Field
 import json
 import PyPDF2
@@ -15,88 +14,73 @@ import base64
 
 from ..models.schemas import UserProfile, OnboardingQuestion, MedicalDocument
 from ..database.manager import db_manager
-from config.settings import settings
+from ..config.settings import settings
 
 logger = logging.getLogger(__name__)
 
 
-class OnboardingTool(BaseTool):
-    """Tool for collecting user onboarding information."""
-    
-    name: str = "onboarding_collector"
-    description: str = "Collects and validates user medical profile information during onboarding"
-    
-    def _run(self, user_id: str, field_name: str, value: str) -> str:
-        """Process onboarding field data."""
-        try:
-            # This would be called asynchronously in practice
-            return f"Collected {field_name}: {value} for user {user_id}"
-        except Exception as e:
-            return f"Error collecting {field_name}: {str(e)}"
+def onboarding_collector(user_id: str, field_name: str, value: str) -> str:
+    """Collects and validates user medical profile information during onboarding."""
+    try:
+        # This would be called asynchronously in practice
+        return f"Collected {field_name}: {value} for user {user_id}"
+    except Exception as e:
+        return f"Error collecting {field_name}: {str(e)}"
 
 
-class DocumentParserTool(BaseTool):
-    """Tool for parsing medical documents and reports."""
-    
-    name: str = "document_parser"
-    description: str = "Parses PDF, DOC, and image files to extract medical information"
-    
-    def _run(self, file_path: str, file_type: str) -> str:
-        """Parse document and extract medical data."""
-        try:
-            if file_type.lower() == 'pdf':
-                return self._parse_pdf(file_path)
-            elif file_type.lower() in ['doc', 'docx']:
-                return self._parse_docx(file_path)
-            elif file_type.lower() in ['jpg', 'jpeg', 'png', 'webp']:
-                return self._parse_image(file_path)
-            else:
-                return f"Unsupported file type: {file_type}"
-        except Exception as e:
-            return f"Error parsing document: {str(e)}"
-    
-    def _parse_pdf(self, file_path: str) -> str:
-        """Parse PDF document."""
-        try:
-            with open(file_path, 'rb') as file:
-                pdf_reader = PyPDF2.PdfReader(file)
-                text = ""
-                for page in pdf_reader.pages:
-                    text += page.extract_text()
-                return text
-        except Exception as e:
-            return f"Error parsing PDF: {str(e)}"
-    
-    def _parse_docx(self, file_path: str) -> str:
-        """Parse DOCX document."""
-        try:
-            doc = docx.Document(file_path)
+def parse_pdf(file_path: str) -> str:
+    """Parse PDF document."""
+    try:
+        with open(file_path, 'rb') as file:
+            pdf_reader = PyPDF2.PdfReader(file)
             text = ""
-            for paragraph in doc.paragraphs:
-                text += paragraph.text + "\n"
+            for page in pdf_reader.pages:
+                text += page.extract_text()
             return text
-        except Exception as e:
-            return f"Error parsing DOCX: {str(e)}"
-    
-    def _parse_image(self, file_path: str) -> str:
-        """Parse image file (this would use GPT-4o Vision in practice)."""
-        try:
-            # In practice, this would send the image to GPT-4o Vision
-            with open(file_path, 'rb') as image_file:
-                image_data = base64.b64encode(image_file.read()).decode()
-                return f"Image parsed successfully. Base64 length: {len(image_data)}"
-        except Exception as e:
-            return f"Error parsing image: {str(e)}"
+    except Exception as e:
+        return f"Error parsing PDF: {str(e)}"
+
+def parse_docx(file_path: str) -> str:
+    """Parse DOCX document."""
+    try:
+        doc = docx.Document(file_path)
+        text = ""
+        for paragraph in doc.paragraphs:
+            text += paragraph.text + "\n"
+        return text
+    except Exception as e:
+        return f"Error parsing DOCX: {str(e)}"
+
+def parse_image(file_path: str) -> str:
+    """Parse image file (this would use GPT-4o Vision in practice)."""
+    try:
+        # In practice, this would send the image to GPT-4o Vision
+        with open(file_path, 'rb') as image_file:
+            image_data = base64.b64encode(image_file.read()).decode()
+            return f"Image parsed successfully. Base64 length: {len(image_data)}"
+    except Exception as e:
+        return f"Error parsing image: {str(e)}"
+
+def document_parser(file_path: str, file_type: str) -> str:
+    """Parses PDF, DOC, and image files to extract medical information."""
+    try:
+        if file_type.lower() == 'pdf':
+            return parse_pdf(file_path)
+        elif file_type.lower() in ['doc', 'docx']:
+            return parse_docx(file_path)
+        elif file_type.lower() in ['jpg', 'jpeg', 'png', 'webp']:
+            return parse_image(file_path)
+        else:
+            return f"Unsupported file type: {file_type}"
+    except Exception as e:
+        return f"Error parsing document: {str(e)}"
 
 
 class MedicalDataAgent:
     """Agent responsible for collecting and processing medical data."""
     
     def __init__(self):
-        self.tools = [
-            OnboardingTool(),
-            DocumentParserTool()
-        ]
+        self.tools = []
         
         self.agent = Agent(
             role="Medical Data Specialist",

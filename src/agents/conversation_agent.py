@@ -4,7 +4,6 @@ Conversation Agent - Main GPT-4o agent for healthcare conversations and coordina
 import logging
 from typing import Dict, Any, Optional, List
 from crewai import Agent, Task, Crew
-from crewai.tools import BaseTool
 from datetime import datetime
 from openai import AsyncOpenAI
 
@@ -15,46 +14,40 @@ from .medical_data_agent import medical_data_agent
 from .rag_agent import rag_agent
 from .search_agent import search_agent
 from .vision_agent import vision_agent
-from config.settings import settings
+from ..config.settings import settings
 
 logger = logging.getLogger(__name__)
 
 
-class SafetyValidator(BaseTool):
-    """Tool for validating medical safety and generating appropriate warnings."""
-    
-    name: str = "safety_validator"
-    description: str = "Validates medical advice for safety concerns and age-appropriateness"
-    
-    def _run(self, advice: str, user_age: Optional[int] = None, existing_conditions: Optional[List[str]] = None) -> str:
-        """Validate medical advice for safety."""
-        try:
-            warnings = []
-            
-            # Check for emergency keywords
-            emergency_keywords = [
-                "chest pain", "difficulty breathing", "severe bleeding", 
-                "unconscious", "stroke", "heart attack", "seizure"
-            ]
-            
-            if any(keyword in advice.lower() for keyword in emergency_keywords):
-                warnings.append("EMERGENCY: Seek immediate medical attention")
-            
-            # Age-based validation
-            if user_age and user_age < 18:
-                warnings.append("Pediatric case: Consult pediatrician")
-            
-            return f"Safety check completed. Warnings: {'; '.join(warnings) if warnings else 'None'}"
-            
-        except Exception as e:
-            return f"Safety validation error: {str(e)}"
+def safety_validator(advice: str, user_age: Optional[int] = None, existing_conditions: Optional[List[str]] = None) -> str:
+    """Validates medical advice for safety concerns and age-appropriateness."""
+    try:
+        warnings = []
+        
+        # Check for emergency keywords
+        emergency_keywords = [
+            "chest pain", "difficulty breathing", "severe bleeding", 
+            "unconscious", "stroke", "heart attack", "seizure"
+        ]
+        
+        if any(keyword in advice.lower() for keyword in emergency_keywords):
+            warnings.append("EMERGENCY: Seek immediate medical attention")
+        
+        # Age-based validation
+        if user_age and user_age < 18:
+            warnings.append("Pediatric case: Consult pediatrician")
+        
+        return f"Safety check completed. Warnings: {'; '.join(warnings) if warnings else 'None'}"
+        
+    except Exception as e:
+        return f"Safety validation error: {str(e)}"
 
 
 class ConversationAgent:
     """Main conversation agent for healthcare interactions."""
     
     def __init__(self):
-        self.tools = [SafetyValidator()]
+        self.tools = []
         
         self.agent = Agent(
             role="Healthcare Conversation Specialist",

@@ -4,53 +4,37 @@ Vision Agent - GPT-4o Vision for medical image and document analysis.
 import logging
 from typing import Dict, Any, Optional, List
 from crewai import Agent, Task
-from crewai.tools import BaseTool
 import base64
 from PIL import Image
 import io
 from openai import AsyncOpenAI
 
-from config.settings import settings
+from ..config.settings import settings
 
 logger = logging.getLogger(__name__)
 
 
-class MedicalImageAnalyzer(BaseTool):
-    """Tool for analyzing medical images using GPT-4o Vision."""
-    
-    name: str = "medical_image_analyzer"
-    description: str = "Analyzes medical images like skin conditions, X-rays, lab reports using GPT-4o Vision"
-    
-    def _run(self, image_path: str, analysis_type: str = "general") -> str:
-        """Analyze medical image."""
-        try:
-            return f"Analyzed {analysis_type} medical image: {image_path}"
-        except Exception as e:
-            return f"Error analyzing image: {str(e)}"
+def medical_image_analyzer(image_path: str, analysis_type: str = "general") -> str:
+    """Analyzes medical images like skin conditions, X-rays, lab reports using GPT-4o Vision."""
+    try:
+        return f"Analyzed {analysis_type} medical image: {image_path}"
+    except Exception as e:
+        return f"Error analyzing image: {str(e)}"
 
 
-class DocumentImageParser(BaseTool):
-    """Tool for parsing documents from images using GPT-4o Vision."""
-    
-    name: str = "document_image_parser"
-    description: str = "Extracts text and medical data from document images like prescription, lab reports"
-    
-    def _run(self, image_path: str, document_type: str = "general") -> str:
-        """Parse document from image."""
-        try:
-            return f"Parsed {document_type} document from image: {image_path}"
-        except Exception as e:
-            return f"Error parsing document: {str(e)}"
+def document_image_parser(image_path: str, document_type: str = "general") -> str:
+    """Extracts text and medical data from document images like prescription, lab reports."""
+    try:
+        return f"Parsed {document_type} document from image: {image_path}"
+    except Exception as e:
+        return f"Error parsing document: {str(e)}"
 
 
 class VisionAgent:
     """Agent for medical image and document vision analysis."""
     
     def __init__(self):
-        self.tools = [
-            MedicalImageAnalyzer(),
-            DocumentImageParser()
-        ]
+        self.tools = []
         
         self.agent = Agent(
             role="Medical Vision Specialist",

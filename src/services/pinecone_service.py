@@ -9,7 +9,7 @@ import hashlib
 import json
 from datetime import datetime
 
-from config.settings import settings
+from ..config.settings import settings
 
 logger = logging.getLogger(__name__)
 

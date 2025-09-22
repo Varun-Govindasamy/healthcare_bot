@@ -7,7 +7,7 @@ import re
 from datetime import datetime
 
 from ..models.schemas import UserProfile, SafetyCheck
-from config.settings import settings
+from ..config.settings import settings
 
 logger = logging.getLogger(__name__)
 
