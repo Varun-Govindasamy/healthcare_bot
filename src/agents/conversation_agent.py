@@ -8,12 +8,12 @@ from datetime import datetime
 from openai import AsyncOpenAI
 
 from ..models.schemas import UserProfile, HealthcareResponse, SafetyCheck
-from ..database.manager import db_manager
+from ..database.manager import DatabaseManager
 from ..services.language_processor import language_processor
-from .medical_data_agent import medical_data_agent
-from .rag_agent import rag_agent
-from .search_agent import search_agent
-from .vision_agent import vision_agent
+from .medical_data_agent import MedicalDataAgent
+from .rag_agent import RAGAgent
+from .search_agent import SearchAgent
+from .vision_agent import VisionAgent
 from ..config.settings import settings
 
 logger = logging.getLogger(__name__)
@@ -378,7 +378,3 @@ class ConversationAgent:
             agent=self.agent,
             expected_output="Comprehensive, empathetic healthcare guidance with safety considerations"
         )
-
-
-# Global conversation agent instance
-conversation_agent = ConversationAgent()

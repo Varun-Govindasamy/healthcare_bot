@@ -7,8 +7,8 @@ from datetime import datetime
 import uuid
 
 from ..models.schemas import UserProfile, OnboardingQuestion, Gender, MedicationPreference
-from ..database.manager import db_manager
-from ..agents.medical_data_agent import medical_data_agent
+from ..database.manager import DatabaseManager
+from ..agents.medical_data_agent import MedicalDataAgent
 from ..services.twilio_service import twilio_service
 
 logger = logging.getLogger(__name__)
@@ -17,14 +17,16 @@ logger = logging.getLogger(__name__)
 class OnboardingService:
     """Service for managing user onboarding flow."""
     
-    def __init__(self):
+    def __init__(self, db_manager: DatabaseManager, medical_data_agent: MedicalDataAgent):
+        self.db_manager = db_manager
+        self.medical_data_agent = medical_data_agent
         self.onboarding_states = {}  # In-memory state storage (use Redis in production)
     
     async def start_onboarding(self, user_id: str, phone_number: str) -> str:
         """Start onboarding process for new user."""
         try:
             # Check if user already exists
-            existing_user = await db_manager.user_repo.get_user_by_id(user_id)
+            existing_user = await self.db_manager.user_repo.get_user_by_id(user_id)
             
             if existing_user and existing_user.is_profile_complete:
                 return "Welcome back! Your profile is already complete. How can I help you today?"
@@ -32,7 +34,7 @@ class OnboardingService:
             # Create new user profile if doesn't exist
             if not existing_user:
                 new_user = UserProfile(user_id=user_id)
-                await db_manager.user_repo.create_user(new_user)
+                await self.db_manager.user_repo.create_user(new_user)
             
             # Initialize onboarding state
             self.onboarding_states[user_id] = {
@@ -68,7 +70,7 @@ Let's start:"""
             # Check if user is in onboarding
             if user_id not in self.onboarding_states:
                 # User might have completed onboarding, check profile
-                user_profile = await db_manager.user_repo.get_user_by_id(user_id)
+                user_profile = await self.db_manager.user_repo.get_user_by_id(user_id)
                 if user_profile and user_profile.is_profile_complete:
                     return "Your profile is already complete! How can I help you today?", True
                 else:
@@ -97,7 +99,7 @@ Let's start:"""
                 return f"❌ {error_message}\n\n{current_question['question']}", False
             
             # Save the response
-            success = await medical_data_agent.process_onboarding_response(
+            success = await self.medical_data_agent.process_onboarding_response(
                 user_id, current_question["field_name"], response
             )
             
@@ -278,14 +280,14 @@ Let's start:"""
         """Complete the onboarding process."""
         try:
             # Update profile completion status
-            await db_manager.user_repo.update_user(user_id, {"is_profile_complete": True})
+            await self.db_manager.user_repo.update_user(user_id, {"is_profile_complete": True})
             
             # Clean up onboarding state
             if user_id in self.onboarding_states:
                 del self.onboarding_states[user_id]
             
             # Get user profile for personalized message
-            user_profile = await db_manager.user_repo.get_user_by_id(user_id)
+            user_profile = await self.db_manager.user_repo.get_user_by_id(user_id)
             
             completion_message = f"""🎉 Congratulations {user_profile.name if user_profile else 'there'}! 
 
@@ -316,7 +318,7 @@ How can I help you today?
     async def check_profile_completion(self, user_id: str) -> bool:
         """Check if user profile is complete."""
         try:
-            user_profile = await db_manager.user_repo.get_user_by_id(user_id)
+            user_profile = await self.db_manager.user_repo.get_user_by_id(user_id)
             return user_profile and user_profile.is_profile_complete
         except Exception as e:
             logger.error(f"Error checking profile completion: {e}")
@@ -351,7 +353,7 @@ How can I help you today?
                 del self.onboarding_states[user_id]
             
             # Reset profile completion status
-            await db_manager.user_repo.update_user(user_id, {"is_profile_complete": False})
+            await self.db_manager.user_repo.update_user(user_id, {"is_profile_complete": False})
             
             # Start fresh onboarding
             phone_number = twilio_service.extract_phone_number(user_id)
@@ -360,7 +362,3 @@ How can I help you today?
         except Exception as e:
             logger.error(f"Error resetting onboarding: {e}")
             return "Sorry, there was an error resetting your profile. Please try again."
-
-
-# Global onboarding service instance
-onboarding_service = OnboardingService()

@@ -13,7 +13,7 @@ import io
 import base64
 
 from ..models.schemas import UserProfile, OnboardingQuestion, MedicalDocument
-from ..database.manager import db_manager
+from ..database.manager import DatabaseManager
 from ..config.settings import settings
 
 logger = logging.getLogger(__name__)
@@ -79,7 +79,8 @@ def document_parser(file_path: str, file_type: str) -> str:
 class MedicalDataAgent:
     """Agent responsible for collecting and processing medical data."""
     
-    def __init__(self):
+    def __init__(self, db_manager: DatabaseManager):
+        self.db_manager = db_manager
         self.tools = []
         
         self.agent = Agent(
@@ -147,7 +148,7 @@ class MedicalDataAgent:
         """Get list of onboarding questions for incomplete profile."""
         try:
             # Get current user profile
-            user = await db_manager.user_repo.get_user_by_id(user_id)
+            user = await self.db_manager.user_repo.get_user_by_id(user_id)
             
             questions = []
             
@@ -227,10 +228,10 @@ class MedicalDataAgent:
         """Process user response to onboarding question."""
         try:
             # Get or create user profile
-            user = await db_manager.user_repo.get_user_by_id(user_id)
+            user = await self.db_manager.user_repo.get_user_by_id(user_id)
             if not user:
                 user = UserProfile(user_id=user_id)
-                await db_manager.user_repo.create_user(user)
+                await self.db_manager.user_repo.create_user(user)
             
             # Process the response based on field type
             update_data = {}
@@ -280,7 +281,7 @@ class MedicalDataAgent:
                     update_data["current_medications"] = []
             
             # Update user profile
-            success = await db_manager.user_repo.update_user(user_id, update_data)
+            success = await self.db_manager.user_repo.update_user(user_id, update_data)
             
             # Check if profile is now complete
             if success:
@@ -295,13 +296,9 @@ class MedicalDataAgent:
     async def _check_and_update_profile_completion(self, user_id: str):
         """Check if profile is complete and update the flag."""
         try:
-            user = await db_manager.user_repo.get_user_by_id(user_id)
+            user = await self.db_manager.user_repo.get_user_by_id(user_id)
             if user and user.check_profile_completeness():
-                await db_manager.user_repo.update_user(user_id, {"is_profile_complete": True})
+                await self.db_manager.user_repo.update_user(user_id, {"is_profile_complete": True})
                 logger.info(f"Profile completed for user {user_id}")
         except Exception as e:
             logger.error(f"Error checking profile completion: {e}")
-
-
-# Global medical data agent instance
-medical_data_agent = MedicalDataAgent()

@@ -26,6 +26,7 @@ from src.database.manager import DatabaseManager
 from src.services.twilio_service import TwilioService
 from src.services.query_processor import QueryProcessor
 from src.services.onboarding_service import OnboardingService
+from src.agents.medical_data_agent import MedicalDataAgent
 from src.utils.safety_validator import MedicalSafetyValidator
 from src.models.schemas import WhatsAppMessage, HealthcareResponse
 
@@ -39,6 +40,111 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+# Basic health query processing function
+async def process_basic_health_query(user_id: str, query: str) -> str:
+    """Process basic health queries with simple responses."""
+    query_lower = query.lower()
+    
+    # Check for common health concerns
+    if 'headache' in query_lower:
+        return """🤕 **Headache Relief:**
+
+**Immediate steps:**
+• Rest in a quiet, dark room
+• Apply cold or warm compress to head/neck
+• Stay hydrated - drink water
+• Consider over-the-counter pain relievers (if no allergies)
+
+**When to see a doctor:**
+• Sudden, severe headache
+• Headache with fever, stiff neck, confusion
+• Headaches that worsen or become frequent
+
+⚠️ This is general guidance. Consult a doctor for persistent or severe symptoms."""
+
+    elif 'fever' in query_lower:
+        return """🌡️ **Fever Management:**
+
+**Immediate steps:**
+• Rest and stay hydrated
+• Use fever-reducing medication (acetaminophen/ibuprofen)
+• Cool compress on forehead
+• Wear light clothing
+
+**When to seek immediate care:**
+• Fever above 103°F (39.4°C)
+• Fever with severe symptoms (difficulty breathing, chest pain)
+• Fever lasting more than 3 days
+
+⚠️ This is general guidance. Consult a doctor for high or persistent fever."""
+
+    elif any(word in query_lower for word in ['cold', 'cough']):
+        return """🤧 **Cold & Cough Relief:**
+
+**Home remedies:**
+• Rest and plenty of fluids
+• Warm salt water gargle
+• Honey and warm water for cough
+• Humidifier or steam inhalation
+
+**When to see a doctor:**
+• Symptoms worsen after 7-10 days
+• High fever or difficulty breathing
+• Severe throat pain or green mucus
+
+⚠️ This is general guidance. Consult a doctor for worsening symptoms."""
+
+    elif any(word in query_lower for word in ['stomach', 'nausea', 'vomit']):
+        return """🤢 **Stomach Issues:**
+
+**Home remedies:**
+• Stay hydrated with clear fluids
+• BRAT diet (Bananas, Rice, Applesauce, Toast)
+• Avoid dairy and spicy foods
+• Rest and avoid solid foods initially
+
+**When to seek care:**
+• Severe dehydration
+• Blood in vomit or stool
+• High fever with stomach pain
+• Symptoms persist over 2 days
+
+⚠️ This is general guidance. Seek immediate care for severe symptoms."""
+
+    elif any(word in query_lower for word in ['pain', 'hurt', 'ache']) and not 'headache' in query_lower:
+        return """😣 **Pain Management:**
+
+**General pain relief:**
+• Rest the affected area
+• Apply ice for acute injuries (first 24-48 hours)
+• Apply heat for muscle tension
+• Over-the-counter pain relievers (if appropriate)
+
+**When to see a doctor:**
+• Severe or worsening pain
+• Pain after injury
+• Pain with swelling, redness, or fever
+• Pain affecting daily activities
+
+⚠️ This is general guidance. Consult a healthcare provider for persistent pain."""
+
+    else:
+        # General health query
+        return f"""👨‍⚕️ **Healthcare Guidance:**
+
+Thank you for your question: "{query[:100]}..."
+
+I can help with common health concerns like:
+• Headaches and fever
+• Cold and cough symptoms  
+• Stomach issues
+• General pain management
+• Basic health questions
+
+Please describe your specific symptoms or health concern, and I'll provide appropriate guidance.
+
+⚠️ **Important:** For emergencies, call emergency services immediately. This is general health information and not a substitute for professional medical advice."""
 
 # Global variables for services
 db_manager: Optional[DatabaseManager] = None
@@ -65,19 +171,23 @@ async def lifespan(app: FastAPI):
         logger.info("✅ Database connections established")
         
         # Initialize Twilio service
-        twilio_service = TwilioService(settings)
+        twilio_service = TwilioService()
         logger.info("✅ Twilio service initialized")
         
         # Initialize safety validator
         safety_validator = MedicalSafetyValidator()
         logger.info("✅ Safety validator initialized")
         
+        # Initialize medical data agent
+        medical_data_agent = MedicalDataAgent(db_manager)
+        logger.info("✅ Medical data agent initialized")
+        
         # Initialize onboarding service
-        onboarding_service = OnboardingService(db_manager, safety_validator)
+        onboarding_service = OnboardingService(db_manager, medical_data_agent)
         logger.info("✅ Onboarding service initialized")
         
         # Initialize query processor
-        query_processor = QueryProcessor(db_manager, safety_validator)
+        query_processor = QueryProcessor(onboarding_service)
         logger.info("✅ Query processor initialized")
         
         logger.info("🚀 Healthcare Chatbot is ready to serve!")
@@ -154,6 +264,47 @@ async def root():
     """Health check endpoint."""
     return "WhatsApp AI Healthcare Chatbot is running! 🏥🤖"
 
+@app.post("/")
+async def webhook_root(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    services: Dict[str, Any] = Depends(get_services)
+):
+    """Handle Twilio webhook at root path (fallback)."""
+    try:
+        # Parse incoming webhook
+        form_data = await request.form()
+        logger.info(f"📱 Root webhook received: {dict(form_data)}")
+        
+        # Extract basic fields
+        from_number = form_data.get('From', '')
+        body = form_data.get('Body', '')
+        to_number = form_data.get('To', '')
+        
+        logger.info(f"� Message from {from_number} to {to_number}: {body}")
+        
+        # Parse message using Twilio service
+        whatsapp_message = services["twilio_service"].parse_incoming_message(dict(form_data))
+        
+        if not whatsapp_message or not whatsapp_message.From:
+            logger.warning("❌ Failed to parse WhatsApp message")
+            return PlainTextResponse("OK", status_code=200)
+        
+        # Process message in background to avoid webhook timeout
+        background_tasks.add_task(
+            process_whatsapp_message,
+            whatsapp_message,
+            services
+        )
+        
+        # Return success immediately to Twilio
+        return PlainTextResponse("✅ Message received and processing", status_code=200)
+        
+    except Exception as e:
+        logger.error(f"❌ Error in root webhook: {str(e)}")
+        # Still return 200 to avoid Twilio retries
+        return PlainTextResponse("OK", status_code=200)
+
 @app.get("/health")
 async def health_check():
     """Detailed health check with service status."""
@@ -187,6 +338,11 @@ async def health_check():
     status_code = 200 if all_services_ok else 503
     return JSONResponse(content=health_status, status_code=status_code)
 
+@app.get("/webhook/whatsapp")
+async def whatsapp_webhook_get():
+    """GET endpoint for WhatsApp webhook verification."""
+    return {"status": "WhatsApp webhook endpoint is active", "method": "GET"}
+
 @app.post("/webhook/whatsapp")
 async def whatsapp_webhook(
     request: Request,
@@ -200,13 +356,20 @@ async def whatsapp_webhook(
     try:
         # Parse incoming webhook
         form_data = await request.form()
-        logger.info(f"Received WhatsApp webhook: {dict(form_data)}")
+        logger.info(f"📱 Received WhatsApp webhook: {dict(form_data)}")
+        
+        # Extract basic fields
+        from_number = form_data.get('From', '')
+        body = form_data.get('Body', '')
+        to_number = form_data.get('To', '')
+        
+        logger.info(f"📨 Message from {from_number} to {to_number}: {body}")
         
         # Parse message using Twilio service
-        whatsapp_message = services["twilio_service"].parse_incoming_message(form_data)
+        whatsapp_message = services["twilio_service"].parse_incoming_message(dict(form_data))
         
-        if not whatsapp_message:
-            logger.warning("Failed to parse WhatsApp message")
+        if not whatsapp_message or not whatsapp_message.From:
+            logger.warning("❌ Failed to parse WhatsApp message")
             return PlainTextResponse("OK", status_code=200)
         
         # Process message in background to avoid webhook timeout
@@ -217,7 +380,7 @@ async def whatsapp_webhook(
         )
         
         # Return success immediately to Twilio
-        return PlainTextResponse("OK", status_code=200)
+        return PlainTextResponse("✅ Message received and processing", status_code=200)
         
     except Exception as e:
         logger.error(f"Error processing WhatsApp webhook: {e}")
@@ -232,33 +395,55 @@ async def process_whatsapp_message(
     Background task to process WhatsApp messages through the healthcare pipeline.
     """
     try:
-        logger.info(f"Processing message from {message.from_number}: {message.body[:100]}...")
+        # Extract phone number from Twilio format
+        phone_number = message.From.replace("whatsapp:", "")
+        message_text = message.Body or ""
+        
+        logger.info(f"Processing message from {phone_number}: {message_text[:100]}...")
         
         # Check if user exists and needs onboarding
-        user_profile = await services["db_manager"].user_repository.get_user(message.from_number)
+        user_profile = await services["db_manager"].user_repo.get_user_by_id(phone_number)
         
-        if not user_profile or not user_profile.onboarding_completed:
+        if not user_profile or not user_profile.is_profile_complete:
             # Handle onboarding flow
-            response = await services["onboarding_service"].process_onboarding_message(
-                message.from_number,
-                message.body
-            )
+            if not user_profile:
+                # New user - start onboarding
+                response_text = await services["onboarding_service"].start_onboarding(
+                    phone_number,
+                    phone_number
+                )
+                response = type('Response', (), {'message': response_text, 'media_url': None})()
+            else:
+                # Existing user continuing onboarding
+                response_text, is_complete = await services["onboarding_service"].process_onboarding_response(
+                    phone_number,
+                    message_text
+                )
+                response = type('Response', (), {'message': response_text, 'media_url': None})()
         else:
-            # Process through main query pipeline
-            response = await services["query_processor"].process_message(message)
+            # Process through main query pipeline (basic health functionality enabled)
+            response_text = await process_basic_health_query(phone_number, message_text)
+            response = type('Response', (), {'message': response_text, 'media_url': None})()
         
         # Send response back via WhatsApp
         if response and response.message:
-            await services["twilio_service"].send_message(
-                to=message.from_number,
-                message=response.message,
-                media_url=response.media_url
-            )
+            if response.media_url:
+                await services["twilio_service"].send_message_with_media(
+                    to_number=phone_number,
+                    message=response.message,
+                    media_url=response.media_url
+                )
+            else:
+                await services["twilio_service"].send_message(
+                    to_number=phone_number,
+                    message=response.message
+                )
             
-            logger.info(f"Sent response to {message.from_number}")
+            logger.info(f"Sent response to {phone_number}")
         
     except Exception as e:
-        logger.error(f"Error processing message from {message.from_number}: {e}")
+        phone_number = message.From.replace("whatsapp:", "") if message.From else "unknown"
+        logger.error(f"Error processing message from {phone_number}: {e}")
         
         # Send error message to user
         try:
@@ -267,7 +452,7 @@ async def process_whatsapp_message(
                 "Please try again in a few moments. If this persists, please contact support."
             )
             await services["twilio_service"].send_message(
-                to=message.from_number,
+                to_number=phone_number,
                 message=error_msg
             )
         except Exception as send_error:

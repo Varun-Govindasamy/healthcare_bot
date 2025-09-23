@@ -37,6 +37,7 @@ class Settings(BaseSettings):
     redis_host: str = "localhost"
     redis_port: int = 6379
     redis_password: Optional[str] = None
+    redis_db: int = 0
     
     # Pinecone Configuration
     pinecone_api_key: str
