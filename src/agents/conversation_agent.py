@@ -257,10 +257,11 @@ class ConversationAgent:
             Provide a comprehensive response that:
             1. Addresses the user's specific concern
             2. Considers their personal medical profile
-            3. Includes relevant prevention/treatment advice
+            3. Includes relevant prevention/treatment advice along with the amount of medicine to be taken and when to take it based on their age and condition. 
+            (ex: Take Paracetamol 500 mg, 1 tablet morning, afternoon, evening after meals.)
             4. Mentions when to seek professional help
             5. Uses appropriate tone (empathetic, reassuring, informative)
-            6. Includes medication recommendations based on their preference
+            6. Includes medication recommendations based on their preference (english, ayurvedhic, home_remedies) - !important.
             7. Adds location-specific information if relevant
             
             Important guidelines:
