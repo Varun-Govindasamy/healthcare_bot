@@ -58,6 +58,7 @@ class Settings(BaseSettings):
     # File Upload Configuration
     max_file_size: int = 10485760  # 10MB in bytes
     allowed_file_types: str = "pdf,doc,docx,jpg,jpeg,png,webp"
+    upload_dir: str = "uploads"
     
     # Rate Limiting
     rate_limit_per_minute: int = 60

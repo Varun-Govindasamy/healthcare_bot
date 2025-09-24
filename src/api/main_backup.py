@@ -2,8 +2,30 @@
 WhatsApp AI Healthcare Chatbot - Main FastAPI Application
 
 This is the main entry point for the healthcare chatbot that integrates:
-- WhatsApp webhook handling via Twilio
-- Multi-language processing with GPT
+- WhatsApp webhook handling via Twilio    """
+    Initializes all services and database connections.
+    """
+    global db_manager, twilio_service, query_processor, onboarding_service, safety_validator, language_processor
+    
+    logger.info("Starting Healthcare Chatbot Application...")
+    
+    try:
+        # Initialize database manager
+        db_manager = DatabaseManager()
+        await db_manager.initialize()
+        logger.info("✅ Database connections established")
+        
+        # Initialize Twilio service
+        twilio_service = TwilioService()
+        logger.info("✅ Twilio service initialized")
+        
+        # Initialize language processor
+        language_processor = LanguageProcessor()
+        logger.info("✅ Language processor initialized")
+        
+        # Initialize safety validator
+        safety_validator = MedicalSafetyValidator()
+        logger.info("✅ Safety validator initialized")rocessing with GPT
 - 5 CrewAI agents for medical assistance
 - Vector database for healthcare knowledge
 - Safety validation and emergency detection
@@ -28,7 +50,6 @@ from src.services.query_processor import QueryProcessor
 from src.services.onboarding_service import OnboardingService
 from src.services.language_processor import LanguageProcessor
 from src.agents.medical_data_agent import MedicalDataAgent
-from src.agents.vision_agent import VisionAgent
 from src.utils.safety_validator import MedicalSafetyValidator
 from src.models.schemas import WhatsAppMessage, HealthcareResponse
 
@@ -49,21 +70,17 @@ async def process_basic_health_query(user_id: str, query: str) -> str:
     global language_processor
     
     try:
-        if language_processor:
-            # Detect language and translate to English for processing
-            detected_language, english_query = await language_processor.process_user_input(query)
-            logger.info(f"Detected language: {detected_language} for user {user_id}")
-            
-            # Process the query in English
-            english_response = await process_health_query_english(user_id, english_query)
-            
-            # Translate response back to user's language
-            final_response = await language_processor.process_bot_response(english_response, detected_language)
-            
-            return final_response
-        else:
-            # Fallback if language processor not available
-            return await process_health_query_english(user_id, query)
+        # Detect language and translate to English for processing
+        detected_language, english_query = await language_processor.process_user_input(query)
+        logger.info(f"Detected language: {detected_language} for user {user_id}")
+        
+        # Process the query in English
+        english_response = await process_health_query_english(user_id, english_query)
+        
+        # Translate response back to user's language
+        final_response = await language_processor.process_bot_response(english_response, detected_language)
+        
+        return final_response
         
     except Exception as e:
         logger.error(f"Error in multi-language health query processing: {e}")
@@ -71,7 +88,7 @@ async def process_basic_health_query(user_id: str, query: str) -> str:
         return await process_health_query_english(user_id, query)
 
 async def process_health_query_english(user_id: str, query: str) -> str:
-    """Process basic health queries with simple responses."""
+    """Process basic health queries in English."""
     query_lower = query.lower()
     
     # Check for common health concerns
@@ -82,7 +99,14 @@ async def process_health_query_english(user_id: str, query: str) -> str:
 • Rest in a quiet, dark room
 • Apply cold or warm compress to head/neck
 • Stay hydrated - drink water
-• Consider over-the-counter pain relievers (if no allergies)
+
+**Medication (for adults):**
+• **Paracetamol**: 500-1000 mg, 1-2 tablets every 4-6 hours (max 4g/day)
+  Take with water, can be taken with or without food
+• **Ibuprofen**: 200-400 mg, 1-2 tablets every 6-8 hours (max 1200mg/day)
+  Take with food to avoid stomach irritation
+• **Aspirin**: 300-600 mg, 1-2 tablets every 4 hours (max 4g/day)
+  Take with food, avoid if under 16 years
 
 **When to see a doctor:**
 • Sudden, severe headache
@@ -96,9 +120,20 @@ async def process_health_query_english(user_id: str, query: str) -> str:
 
 **Immediate steps:**
 • Rest and stay hydrated
-• Use fever-reducing medication (acetaminophen/ibuprofen)
 • Cool compress on forehead
 • Wear light clothing
+• Monitor temperature regularly
+
+**Medication (for adults):**
+• **Paracetamol**: 500-1000 mg, 1-2 tablets every 4-6 hours
+  Take with water after meals (max 4g/day)
+• **Ibuprofen**: 400 mg, 1 tablet every 6-8 hours
+  Take with food to prevent stomach upset (max 1200mg/day)
+• **Aspirin**: 300-600 mg, 1-2 tablets every 4 hours with food
+  (Avoid if under 16 years, max 4g/day)
+
+**For children (consult pediatrician for exact dose):**
+• Paracetamol syrup: 10-15mg/kg body weight every 4-6 hours
 
 **When to seek immediate care:**
 • Fever above 103°F (39.4°C)
@@ -174,115 +209,6 @@ Please describe your specific symptoms or health concern, and I'll provide appro
 
 ⚠️ **Important:** For emergencies, call emergency services immediately. This is general health information and not a substitute for professional medical advice."""
 
-async def process_image_analysis(user_id: str, image_url: str, image_type: str = "skin", user_context: Optional[Dict[str, Any]] = None) -> str:
-    """Process uploaded images for skin condition analysis with medication suggestions."""
-    global vision_agent, language_processor, twilio_service
-    
-    try:
-        if not vision_agent:
-            return "🔍 **Image Analysis Unavailable**\n\nSorry, image analysis service is currently unavailable. Please describe your symptoms in text for assistance."
-        
-        # Download the image first
-        if not twilio_service:
-            return "❌ **Service Error**\n\nUnable to download image. Please try again later."
-        
-        # Download media file
-        downloaded_file_path = await twilio_service.download_media(image_url, user_id)
-        
-        if not downloaded_file_path:
-            return "❌ **Download Failed**\n\nUnable to download the image. Please try sending the image again."
-        
-        logger.info(f"🖼️ Processing image analysis for user {user_id}: {downloaded_file_path}")
-        
-        # Analyze skin condition
-        analysis_result = await vision_agent.analyze_skin_condition(downloaded_file_path, user_context)
-        
-        if "error" in analysis_result:
-            return f"❌ **Analysis Error**\n\n{analysis_result['error']}\n\n💡 **Tip**: Try uploading a clearer image or describe your symptoms in text."
-        
-        # Format the response with medication suggestions
-        response = format_image_analysis_response(analysis_result)
-        
-        return response
-        
-    except Exception as e:
-        logger.error(f"Error processing image analysis: {e}")
-        return "❌ **Analysis Failed**\n\nSorry, we couldn't analyze your image. Please describe your symptoms in text, and I'll provide appropriate guidance."
-
-def format_image_analysis_response(analysis_result: Dict[str, Any]) -> str:
-    """Format the image analysis result with medication suggestions."""
-    
-    if analysis_result.get("raw_response"):
-        # Handle raw text response
-        return f"🔍 **Image Analysis Results**\n\n{analysis_result.get('analysis_text', 'Analysis completed')}\n\n⚠️ **Important**: This is AI analysis only. Please consult a dermatologist for professional diagnosis and treatment."
-    
-    response = "🔍 **Skin Condition Analysis**\n\n"
-    
-    # Visual description
-    if "description" in analysis_result:
-        response += f"📝 **What I can see:**\n{analysis_result['description']}\n\n"
-    
-    # Possible conditions
-    if "possible_conditions" in analysis_result:
-        response += f"🔬 **Possible conditions:**\n{analysis_result['possible_conditions']}\n\n"
-    
-    # Immediate care with specific medications
-    if "immediate_care" in analysis_result:
-        response += f"🏠 **Immediate care & medications:**\n{analysis_result['immediate_care']}\n\n"
-    else:
-        # Add general medication suggestions for skin conditions
-        response += """🏠 **General care & medications:**
-        
-**For inflammatory skin conditions:**
-• **Hydrocortisone cream 1%**: Apply thin layer 2-3 times daily
-• **Calamine lotion**: Apply as needed for itching relief
-• **Antihistamines**: Cetirizine 10mg once daily for itching
-• **Moisturizer**: Apply fragrance-free moisturizer 2-3 times daily
-
-**For minor wounds/cuts:**
-• **Antiseptic**: Clean with betadine or hydrogen peroxide
-• **Antibiotic ointment**: Neosporin - apply 2-3 times daily
-• **Bandage**: Keep covered and change daily
-
-**Pain relief:**
-• **Ibuprofen**: 400mg every 6-8 hours with food (for inflammation)
-• **Paracetamol**: 500mg every 4-6 hours (for pain)
-
-"""
-    
-    # When to see doctor
-    if "when_to_see_doctor" in analysis_result:
-        response += f"🚨 **See a doctor if:**\n{analysis_result['when_to_see_doctor']}\n\n"
-    else:
-        response += """🚨 **See a doctor if:**
-• Condition worsens or doesn't improve in 3-5 days
-• Signs of infection (increased redness, warmth, pus, red streaks)
-• Severe pain or itching
-• Fever or feeling unwell
-• Spreading rash or lesions
-
-"""
-    
-    # Prevention advice
-    if "prevention" in analysis_result:
-        response += f"🛡️ **Prevention tips:**\n{analysis_result['prevention']}\n\n"
-    
-    # Disclaimer
-    response += """⚠️ **Important Medical Disclaimer:**
-• This is AI-powered image analysis, not a medical diagnosis
-• Always consult a dermatologist or healthcare provider for professional evaluation
-• Medication suggestions are general guidelines - check with pharmacist/doctor
-• Seek immediate medical attention for severe symptoms
-• This guidance cannot replace professional medical consultation
-
-💊 **Medication Safety:**
-• Check dosages with pharmacist for your age/weight
-• Read medication labels and warnings
-• Stop use if allergic reactions occur
-• Some medications may not be suitable for children, pregnant women, or people with certain conditions"""
-    
-    return response
-
 # Global variables for services
 db_manager: Optional[DatabaseManager] = None
 twilio_service: Optional[TwilioService] = None  
@@ -290,7 +216,6 @@ query_processor: Optional[QueryProcessor] = None
 onboarding_service: Optional[OnboardingService] = None
 safety_validator: Optional[MedicalSafetyValidator] = None
 language_processor: Optional[LanguageProcessor] = None
-vision_agent: Optional[VisionAgent] = None
 settings: Settings = Settings()
 
 @asynccontextmanager
@@ -299,7 +224,7 @@ async def lifespan(app: FastAPI):
     Application lifespan manager for startup and shutdown events.
     Initializes all services and database connections.
     """
-    global db_manager, twilio_service, query_processor, onboarding_service, safety_validator, language_processor, vision_agent
+    global db_manager, twilio_service, query_processor, onboarding_service, safety_validator, language_processor
     
     logger.info("Starting Healthcare Chatbot Application...")
     
@@ -317,9 +242,35 @@ async def lifespan(app: FastAPI):
         language_processor = LanguageProcessor()
         logger.info("✅ Language processor initialized")
         
-        # Initialize vision agent
-        vision_agent = VisionAgent()
-        logger.info("✅ Vision agent initialized")
+        # Initialize safety validator
+        safety_validator = MedicalSafetyValidator()
+        logger.info("✅ Safety validator initialized")
+db_manager: Optional[DatabaseManager] = None
+twilio_service: Optional[TwilioService] = None
+query_processor: Optional[QueryProcessor] = None
+onboarding_service: Optional[OnboardingService] = None
+safety_validator: Optional[MedicalSafetyValidator] = None
+settings: Settings = Settings()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    Application lifespan manager for startup and shutdown events.
+    Initializes all services and database connections.
+    """
+    global db_manager, twilio_service, query_processor, onboarding_service, safety_validator
+    
+    logger.info("Starting Healthcare Chatbot Application...")
+    
+    try:
+        # Initialize database manager
+        db_manager = DatabaseManager()
+        await db_manager.initialize()
+        logger.info("✅ Database connections established")
+        
+        # Initialize Twilio service
+        twilio_service = TwilioService()
+        logger.info("✅ Twilio service initialized")
         
         # Initialize safety validator
         safety_validator = MedicalSafetyValidator()
@@ -395,8 +346,7 @@ app.add_middleware(
 # Dependency to get services
 async def get_services():
     """Dependency to provide access to initialized services."""
-    # Don't require language_processor and vision_agent to be initialized for basic functionality
-    if not all([db_manager, twilio_service, query_processor, onboarding_service, safety_validator]):
+    if not all([db_manager, twilio_service, query_processor, onboarding_service, safety_validator, language_processor]):
         raise HTTPException(status_code=503, detail="Services not initialized")
     
     return {
@@ -405,8 +355,7 @@ async def get_services():
         "query_processor": query_processor,
         "onboarding_service": onboarding_service,
         "safety_validator": safety_validator,
-        "language_processor": language_processor,  # Can be None if not initialized
-        "vision_agent": vision_agent  # Can be None if not initialized
+        "language_processor": language_processor
     }
 
 @app.get("/", response_class=PlainTextResponse)
@@ -467,8 +416,7 @@ async def health_check():
             "query_processor": query_processor is not None,
             "onboarding": onboarding_service is not None,
             "safety_validator": safety_validator is not None,
-            "language_processor": language_processor is not None,
-            "vision_agent": vision_agent is not None
+            "language_processor": language_processor is not None
         }
     }
     
@@ -550,19 +498,15 @@ async def process_whatsapp_message(
         # Extract phone number from Twilio format
         phone_number = message.From.replace("whatsapp:", "")
         message_text = message.Body or ""
-        has_media = message.MediaUrl0 and message.MediaUrl0.strip()
         
-        logger.info(f"Processing message from {phone_number}: {message_text[:100]}... (Media: {'Yes' if has_media else 'No'})")
+        logger.info(f"Processing message from {phone_number}: {message_text[:100]}...")
         
         # Check if user exists and needs onboarding
         user_profile = await services["db_manager"].user_repo.get_user_by_id(phone_number)
         
         if not user_profile or not user_profile.is_profile_complete:
-            # Handle onboarding flow - don't process images during onboarding
-            if has_media:
-                response_text = "📝 **Please complete your profile first**\n\nI see you've sent an image. Before I can analyze images, please complete your health profile by answering a few questions. This helps me provide more accurate analysis.\n\nPlease answer the current profile question first."
-                response = type('Response', (), {'message': response_text, 'media_url': None})()
-            elif not user_profile:
+            # Handle onboarding flow
+            if not user_profile:
                 # New user - start onboarding
                 response_text = await services["onboarding_service"].start_onboarding(
                     phone_number,
@@ -577,36 +521,9 @@ async def process_whatsapp_message(
                 )
                 response = type('Response', (), {'message': response_text, 'media_url': None})()
         else:
-            # User profile is complete - process normally
-            if has_media:
-                # Process image upload
-                logger.info(f"🖼️ Processing image from {phone_number}")
-                
-                # Get user context for better analysis
-                user_context = {
-                    'age': user_profile.age,
-                    'gender': user_profile.gender.value if user_profile.gender else None,
-                    'allergies': user_profile.allergies,
-                    'existing_conditions': user_profile.existing_conditions
-                } if user_profile else None
-                
-                # Determine image type from message text if provided
-                image_type = "skin"  # Default to skin analysis
-                if message_text:
-                    text_lower = message_text.lower()
-                    if any(word in text_lower for word in ['skin', 'rash', 'spot', 'itch', 'bump', 'mole', 'acne']):
-                        image_type = "skin"
-                    elif any(word in text_lower for word in ['wound', 'cut', 'injury']):
-                        image_type = "wound"
-                    elif any(word in text_lower for word in ['lab', 'report', 'test', 'result']):
-                        image_type = "lab_report"
-                
-                response_text = await process_image_analysis(phone_number, message.MediaUrl0 or "", image_type, user_context)
-                response = type('Response', (), {'message': response_text, 'media_url': None})()
-            else:
-                # Process text-based health query
-                response_text = await process_basic_health_query(phone_number, message_text)
-                response = type('Response', (), {'message': response_text, 'media_url': None})()
+            # Process through main query pipeline (basic health functionality enabled)
+            response_text = await process_basic_health_query(phone_number, message_text)
+            response = type('Response', (), {'message': response_text, 'media_url': None})()
         
         # Send response back via WhatsApp
         if response and response.message:

@@ -62,10 +62,13 @@ class TwilioService:
             return False
     
     async def download_media(self, media_url: str, user_id: str) -> Optional[str]:
-        """Download media file from Twilio."""
+        """Download media file from Twilio with proper redirect handling."""
         try:
             if not media_url:
+                logger.warning("No media URL provided")
                 return None
+            
+            logger.info(f"Attempting to download media from: {media_url[:100]}...")
             
             # Create user upload directory
             user_upload_dir = os.path.join(settings.upload_dir, user_id)
@@ -80,24 +83,61 @@ class TwilioService:
             filename = f"media_{timestamp}{file_extension}"
             file_path = os.path.join(user_upload_dir, filename)
             
-            # Download file
-            async with httpx.AsyncClient() as client:
+            # Download file with proper redirect handling
+            async with httpx.AsyncClient(
+                follow_redirects=True,
+                timeout=30.0,
+                limits=httpx.Limits(max_keepalive_connections=5, max_connections=10)
+            ) as client:
                 # Add Twilio auth for media download
                 auth = (settings.twilio_account_sid, settings.twilio_auth_token)
-                response = await client.get(media_url, auth=auth)
                 
-                if response.status_code == 200:
-                    async with aiofiles.open(file_path, 'wb') as f:
-                        await f.write(response.content)
+                try:
+                    # First attempt: Direct download with auth
+                    response = await client.get(media_url, auth=auth)
                     
-                    logger.info(f"Downloaded media file: {file_path}")
-                    return file_path
-                else:
-                    logger.error(f"Failed to download media: HTTP {response.status_code}")
+                    # Handle redirects manually if needed
+                    if response.status_code in [301, 302, 307, 308]:
+                        redirect_url = response.headers.get('location')
+                        if redirect_url:
+                            logger.info(f"Following redirect from Twilio to: {redirect_url[:100]}...")
+                            # Try without auth for the final URL (common for CDN redirects)
+                            response = await client.get(redirect_url)
+                    
+                    if response.status_code == 200:
+                        # Validate it's actually an image
+                        content_type = response.headers.get('content-type', '').lower()
+                        if not any(img_type in content_type for img_type in ['image', 'jpeg', 'jpg', 'png', 'gif', 'webp']):
+                            logger.warning(f"Downloaded content may not be an image. Content-Type: {content_type}")
+                        
+                        async with aiofiles.open(file_path, 'wb') as f:
+                            await f.write(response.content)
+                        
+                        file_size = len(response.content)
+                        logger.info(f"✅ Successfully downloaded media: {file_path} (Size: {file_size} bytes, Type: {content_type})")
+                        return file_path
+                    else:
+                        logger.error(f"❌ Failed to download media: HTTP {response.status_code}")
+                        logger.error(f"Response headers: {dict(response.headers)}")
+                        if response.text:
+                            logger.error(f"Response body: {response.text[:200]}")
+                        return None
+                        
+                except httpx.HTTPStatusError as http_err:
+                    logger.error(f"HTTP status error: {http_err}")
+                    return None
+                except httpx.RequestError as req_err:
+                    logger.error(f"Request error: {req_err}")
                     return None
                     
+        except httpx.HTTPStatusError as e:
+            logger.error(f"HTTP error downloading media: {e.response.status_code} - {e.response.text}")
+            return None
+        except httpx.RequestError as e:
+            logger.error(f"Request error downloading media: {e}")
+            return None
         except Exception as e:
-            logger.error(f"Error downloading media: {e}")
+            logger.error(f"Unexpected error downloading media: {e}")
             return None
     
     def create_response(self, message: str) -> str:

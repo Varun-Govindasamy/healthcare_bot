@@ -108,20 +108,31 @@ class VisionAgent:
                 """
             
             prompt = f"""
-            Analyze this skin condition image and provide a structured assessment. 
+            Analyze this skin condition image and provide a structured assessment with specific medication recommendations. 
             {context}
             
             Please provide:
             1. Visual description of the skin condition
             2. Possible condition(s) it might indicate (with confidence levels)
-            3. Recommended immediate care steps
+            3. Recommended immediate care steps with SPECIFIC medications, dosages, and application instructions
             4. When to seek medical attention
             5. General prevention advice
+            
+            For medication recommendations, include:
+            - Specific drug names (e.g., Hydrocortisone cream 1%, Cetirizine 10mg)
+            - Exact dosages and frequency
+            - Application instructions (e.g., "Apply thin layer twice daily after cleaning area")
+            - Duration of treatment
+            - Safety warnings (age restrictions, pregnancy warnings, etc.)
+            
+            Example format for medications:
+            "For itchy rash: Apply Hydrocortisone cream 1%, thin layer twice daily for up to 7 days. Take Cetirizine 10mg tablets, one tablet daily for allergic reactions."
             
             Important: 
             - This is AI analysis only, not a medical diagnosis
             - Always recommend consulting a dermatologist for definitive diagnosis
-            - Focus on general care and when to seek help
+            - Include specific medication safety warnings
+            - Focus on over-the-counter options primarily
             - Be empathetic and reassuring
             
             Format as JSON with keys: description, possible_conditions, immediate_care, when_to_see_doctor, prevention, disclaimer
