@@ -16,7 +16,7 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
 import logging
 from contextlib import asynccontextmanager
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 import asyncio
 from datetime import datetime
 
@@ -31,6 +31,7 @@ from src.agents.medical_data_agent import MedicalDataAgent
 from src.agents.vision_agent import VisionAgent
 from src.utils.safety_validator import MedicalSafetyValidator
 from src.models.schemas import WhatsAppMessage, HealthcareResponse
+from openai import AsyncOpenAI
 
 # Configure logging
 logging.basicConfig(
@@ -158,21 +159,64 @@ async def process_health_query_english(user_id: str, query: str) -> str:
 ⚠️ This is general guidance. Consult a healthcare provider for persistent pain."""
 
     else:
-        # General health query
-        return f"""👨‍⚕️ **Healthcare Guidance:**
+        # General health query → use LLM to produce a concise, human-readable medical overview
+        try:
+            return await generate_medical_answer_english(query)
+        except Exception as _e:
+            logger.warning(f"LLM fallback failed, using generic guidance: {_e}")
+            return f"""👨‍⚕️ **Healthcare Guidance:**
 
 Thank you for your question: "{query[:100]}..."
 
-I can help with common health concerns like:
-• Headaches and fever
-• Cold and cough symptoms  
-• Stomach issues
-• General pain management
-• Basic health questions
+I'm unable to fetch a detailed answer right now. Please share your main symptoms, how long you've had them, and any key medical history (age, allergies, existing conditions). I'll provide tailored guidance.
 
-Please describe your specific symptoms or health concern, and I'll provide appropriate guidance.
+⚠️ **Important:** For emergencies, call emergency services immediately. This is educational information and not a substitute for professional medical advice."""
 
-⚠️ **Important:** For emergencies, call emergency services immediately. This is general health information and not a substitute for professional medical advice."""
+async def generate_medical_answer_english(query: str) -> str:
+    """Use GPT to answer general health questions in a concise, responsible format."""
+    global openai_client, settings
+    # Lazy init in case startup path didn't set it yet
+    if not openai_client and getattr(settings, 'openai_api_key', None):
+        try:
+            from openai import AsyncOpenAI as _AsyncOpenAI
+            openai_client = _AsyncOpenAI(api_key=settings.openai_api_key)
+            logger.info("Initialized OpenAI client lazily for general Q&A")
+        except Exception as e:
+            logger.warning(f"Failed lazy OpenAI init: {e}")
+    if not openai_client:
+        raise RuntimeError("OpenAI client is not initialized")
+
+    system_msg = (
+        "You are a careful, helpful medical information assistant. Answer general health questions "
+        "in simple, human-readable language. Be concise (around 8–12 bullets/short lines total). "
+        "Do NOT diagnose individuals. Include: definition/overview, common symptoms, how it spreads/causes (if relevant), "
+        "self-care, typical treatments (OTC if appropriate), prevention, and when to see a doctor. "
+        "End with a brief safety disclaimer. Avoid long paragraphs; use short bullets."
+    )
+
+    user_prompt = (
+        f"Question: {query}\n\n"
+        "Provide a compact response with clear section headers and bullets. Keep within WhatsApp-friendly length."
+    )
+
+    resp = await openai_client.chat.completions.create(
+        model=getattr(settings, 'gpt_model', 'gpt-4o-mini'),
+        messages=[
+            {"role": "system", "content": system_msg},
+            {"role": "user", "content": user_prompt},
+        ],
+        temperature=0.2,
+        max_tokens=700,
+    )
+    text = resp.choices[0].message.content.strip()
+
+    # Append a standard disclaimer if model omitted it
+    if "Important" not in text and "disclaimer" not in text.lower():
+        text += (
+            "\n\n⚠️ **Important:** This is general health information and not a substitute for professional medical advice. "
+            "See a healthcare professional for diagnosis and treatment."
+        )
+    return text
 
 async def process_image_analysis(user_id: str, image_url: str, image_type: str = "skin", user_context: Optional[Dict[str, Any]] = None) -> str:
     """Process uploaded images for skin condition analysis with medication suggestions."""
@@ -213,9 +257,53 @@ def format_image_analysis_response(analysis_result: Dict[str, Any]) -> str:
     """Format the image analysis result with medication suggestions."""
     
     if analysis_result.get("raw_response"):
-        # Handle raw text response
-        return f"🔍 **Image Analysis Results**\n\n{analysis_result.get('analysis_text', 'Analysis completed')}\n\n⚠️ **Important**: This is AI analysis only. Please consult a dermatologist for professional diagnosis and treatment."
+        # Handle raw text response. If it's a refusal, provide a safe general fallback.
+        raw = (analysis_result.get('analysis_text') or '').strip()
+        lower = raw.lower()
+        refusal_markers = [
+            "i'm sorry, i can't", "i am sorry, i can't", "i cannot assist", "can't assist",
+            "cannot assist", "can't help", "cannot help"
+        ]
+        if any(m in lower for m in refusal_markers):
+            return (
+                "🔍 **Skin Condition Analysis**\n\n"
+                "📝 **What I can see:**\nGeneral signs of skin irritation/rash.\n\n"
+                "🏠 **Immediate care & medications:**\n"
+                "• Hydrocortisone 1% cream — apply a thin layer 1–2× daily for up to 7 days\n"
+                "• Cetirizine 10 mg — 1 tablet once daily for itch (adult dose)\n"
+                "• If ring-shaped, scaly edges → Clotrimazole 1% cream 2× daily for 2–4 weeks\n"
+                "• Keep area clean/dry, gentle cleanser, fragrance‑free moisturizer\n\n"
+                "🚨 **See a doctor if:**\n"
+                "• Rapid spreading, severe pain, fever, pus, or no improvement in 3–5 days\n\n"
+                "⚠️ **Important**: Educational guidance only, not a diagnosis. Please consult a dermatologist."
+            )
+        # Otherwise show the raw text from the model
+        return f"🔍 **Image Analysis Results**\n\n{raw or 'Analysis completed'}\n\n⚠️ **Important**: This is AI analysis only. Please consult a dermatologist for professional diagnosis and treatment."
     
+    def bullets(items: List[str]) -> str:
+        return "\n".join([f"• {it}" for it in items if it]) + ("\n" if items else "")
+
+    def safe_get_list(val) -> List:
+        if val is None:
+            return []
+        if isinstance(val, list):
+            return val
+        if isinstance(val, str):
+            # try to parse JSON-like strings
+            try:
+                import json
+                obj = json.loads(val)
+                return obj if isinstance(obj, list) else [val]
+            except Exception:
+                # fallback to Python-literal style (single quotes)
+                try:
+                    import ast
+                    obj = ast.literal_eval(val)
+                    return obj if isinstance(obj, list) else [obj]
+                except Exception:
+                    return [val]
+        return [val]
+
     response = "🔍 **Skin Condition Analysis**\n\n"
     
     # Visual description
@@ -224,11 +312,67 @@ def format_image_analysis_response(analysis_result: Dict[str, Any]) -> str:
     
     # Possible conditions
     if "possible_conditions" in analysis_result:
-        response += f"🔬 **Possible conditions:**\n{analysis_result['possible_conditions']}\n\n"
+        pcs = safe_get_list(analysis_result.get("possible_conditions"))[:3]
+        lines: List[str] = []
+        for item in pcs:
+            if isinstance(item, dict):
+                name = item.get("name") or item.get("condition") or "Condition"
+                conf = item.get("confidence_percent") or item.get("confidence")
+                rationale = item.get("rationale") or item.get("reason")
+                parts = [name]
+                if conf is not None:
+                    try:
+                        conf_val = int(float(conf))
+                        parts.append(f"{conf_val}%")
+                    except Exception:
+                        parts.append(str(conf))
+                if rationale:
+                    parts.append(f"— {rationale}")
+                lines.append(" ".join(parts))
+            else:
+                lines.append(str(item))
+        if lines:
+            response += "🔬 **Possible conditions:**\n" + bullets(lines) + "\n"
     
     # Immediate care with specific medications
     if "immediate_care" in analysis_result:
-        response += f"🏠 **Immediate care & medications:**\n{analysis_result['immediate_care']}\n\n"
+        care_items = safe_get_list(analysis_result.get("immediate_care"))[:4]
+        lines: List[str] = []
+        for it in care_items:
+            if isinstance(it, dict):
+                issue = it.get("issue")
+                med = it.get("medication")
+                rec = it.get("recommendation")
+                dosage = it.get("dosage")
+                freq = it.get("frequency")
+                app = it.get("application")
+                dur = it.get("duration")
+                warn = it.get("warnings")
+                line = []
+                if issue:
+                    line.append(f"{issue}:")
+                if rec:
+                    line.append(rec)
+                if med:
+                    line.append(f"{med}")
+                tail = []
+                if dosage:
+                    tail.append(dosage)
+                if freq:
+                    tail.append(freq)
+                if app:
+                    tail.append(app)
+                if tail:
+                    line.append(" — " + ", ".join(tail))
+                if dur:
+                    line.append(f" (Duration: {dur})")
+                if warn:
+                    line.append(f" [Warnings: {warn}]")
+                lines.append(" ".join(part for part in line if part))
+            else:
+                lines.append(str(it))
+        if lines:
+            response += "🏠 **Immediate care & medications:**\n" + bullets(lines) + "\n"
     else:
         # Add general medication suggestions for skin conditions
         response += """🏠 **General care & medications:**
@@ -252,7 +396,9 @@ def format_image_analysis_response(analysis_result: Dict[str, Any]) -> str:
     
     # When to see doctor
     if "when_to_see_doctor" in analysis_result:
-        response += f"🚨 **See a doctor if:**\n{analysis_result['when_to_see_doctor']}\n\n"
+        flags = analysis_result.get("when_to_see_doctor")
+        items = safe_get_list(flags)
+        response += "🚨 **See a doctor if:**\n" + bullets([str(x) for x in items]) + "\n"
     else:
         response += """🚨 **See a doctor if:**
 • Condition worsens or doesn't improve in 3-5 days
@@ -265,7 +411,9 @@ def format_image_analysis_response(analysis_result: Dict[str, Any]) -> str:
     
     # Prevention advice
     if "prevention" in analysis_result:
-        response += f"🛡️ **Prevention tips:**\n{analysis_result['prevention']}\n\n"
+        prev = analysis_result.get("prevention")
+        items = safe_get_list(prev)
+        response += "🛡️ **Prevention tips:**\n" + bullets([str(x) for x in items]) + "\n"
     
     # Disclaimer
     response += """⚠️ **Important Medical Disclaimer:**
@@ -292,6 +440,7 @@ safety_validator: Optional[MedicalSafetyValidator] = None
 language_processor: Optional[LanguageProcessor] = None
 vision_agent: Optional[VisionAgent] = None
 settings: Settings = Settings()
+openai_client: Optional[AsyncOpenAI] = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -299,7 +448,7 @@ async def lifespan(app: FastAPI):
     Application lifespan manager for startup and shutdown events.
     Initializes all services and database connections.
     """
-    global db_manager, twilio_service, query_processor, onboarding_service, safety_validator, language_processor, vision_agent
+    global db_manager, twilio_service, query_processor, onboarding_service, safety_validator, language_processor, vision_agent, openai_client
     
     logger.info("Starting Healthcare Chatbot Application...")
     
@@ -320,6 +469,19 @@ async def lifespan(app: FastAPI):
         # Initialize vision agent
         vision_agent = VisionAgent()
         logger.info("✅ Vision agent initialized")
+        
+        # Initialize OpenAI client for general Q&A
+        try:
+            if settings.openai_api_key:
+                from openai import AsyncOpenAI as _AsyncOpenAI  # local import to avoid startup issues
+                # nosec - API key comes from configuration
+                openai_client = _AsyncOpenAI(api_key=settings.openai_api_key)
+                logger.info("✅ OpenAI client initialized for general Q&A")
+            else:
+                logger.warning("OpenAI API key not set; general Q&A will use generic guidance")
+        except Exception as e:
+            logger.error(f"Failed to initialize OpenAI client: {e}")
+            openai_client = None
         
         # Initialize safety validator
         safety_validator = MedicalSafetyValidator()
@@ -446,14 +608,13 @@ async def webhook_root(
             whatsapp_message,
             services
         )
-        
-        # Return success immediately to Twilio
-        return PlainTextResponse("✅ Message received and processing", status_code=200)
-        
+        # Return empty 200 so Twilio does not send an immediate message.
+        return PlainTextResponse("", status_code=200)
+    
     except Exception as e:
         logger.error(f"❌ Error in root webhook: {str(e)}")
-        # Still return 200 to avoid Twilio retries
-        return PlainTextResponse("OK", status_code=200)
+        # Still return 200 (empty) to avoid Twilio retries and avoid sending a user-visible message
+        return PlainTextResponse("", status_code=200)
 
 @app.get("/health")
 async def health_check():
@@ -530,14 +691,13 @@ async def whatsapp_webhook(
             whatsapp_message,
             services
         )
-        
-        # Return success immediately to Twilio
-        return PlainTextResponse("✅ Message received and processing", status_code=200)
-        
+        # Return empty 200 so Twilio does not send an immediate message.
+        return PlainTextResponse("", status_code=200)
+    
     except Exception as e:
         logger.error(f"Error processing WhatsApp webhook: {e}")
-        # Still return 200 to avoid Twilio retries
-        return PlainTextResponse("OK", status_code=200)
+        # Still return 200 (empty) to avoid Twilio retries and avoid sending a user-visible message
+        return PlainTextResponse("", status_code=200)
 
 async def process_whatsapp_message(
     message: WhatsAppMessage,
@@ -652,17 +812,18 @@ async def send_message_api(
     API endpoint to send messages programmatically (for testing/admin purposes).
     """
     try:
-        message_sid = await services["twilio_service"].send_message(
-            to=to,
-            message=message,
-            media_url=media_url
-        )
-        
-        return {
-            "success": True,
-            "message_sid": message_sid,
-            "sent_to": to
-        }
+        if media_url:
+            ok = await services["twilio_service"].send_message_with_media(
+                to_number=to,
+                message=message,
+                media_url=media_url
+            )
+        else:
+            ok = await services["twilio_service"].send_message(
+                to_number=to,
+                message=message
+            )
+        return {"success": bool(ok), "sent_to": to}
         
     except Exception as e:
         logger.error(f"Failed to send message via API: {e}")

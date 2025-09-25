@@ -23,40 +23,96 @@ class TwilioService:
     def __init__(self):
         self.client = Client(settings.twilio_account_sid, settings.twilio_auth_token)
         self.from_number = f"whatsapp:{settings.twilio_phone_number}"
+        # Twilio hard limit for WhatsApp message body is 1600 chars. Keep headroom for prefixes.
+        self._twilio_max_len = 1600
+        # Keep extra headroom to avoid 21617 'concatenated message body exceeds 1600' errors
+        self._chunk_len = 1400
+
+    def _split_message(self, text: str, max_len: int = None) -> List[str]:
+        """Split text into chunks under Twilio's limit, preferring paragraph/line boundaries."""
+        if text is None:
+            return [""]
+        max_len = max_len or self._chunk_len
+        text = text.strip()
+        if len(text) <= max_len:
+            return [text]
+
+        chunks: List[str] = []
+        remaining = text
+        while remaining:
+            if len(remaining) <= max_len:
+                chunks.append(remaining)
+                break
+
+            # Try to split at double-newline, then single newline, then last space, else hard cut
+            cut = max_len
+            window = remaining[:max_len]
+            for sep in ["\n\n", "\n", " "]:
+                idx = window.rfind(sep)
+                if idx >= 0 and idx >= max_len * 0.6:  # avoid very small tail
+                    cut = idx + (0 if sep.strip() else 1)  # include the space
+                    break
+            chunk = remaining[:cut].rstrip()
+            chunks.append(chunk)
+            remaining = remaining[cut:].lstrip()
+
+        # Add (part x/N) prefixes if multiple
+        if len(chunks) > 1:
+            total = len(chunks)
+            prefixed: List[str] = []
+            for i, c in enumerate(chunks, 1):
+                prefix = f"({i}/{total})\n"
+                # ensure we keep under the hard limit
+                allowed = self._chunk_len - len(prefix)
+                if len(c) > allowed:
+                    c = c[:allowed]
+                prefixed.append(prefix + c)
+            chunks = prefixed
+        return chunks
     
     async def send_message(self, to_number: str, message: str) -> bool:
-        """Send WhatsApp message to user."""
+        """Send WhatsApp message to user, auto-chunking to respect Twilio's 1600-char limit."""
         try:
             formatted_to = f"whatsapp:{to_number}"
-            
-            message = self.client.messages.create(
-                body=message,
-                from_=self.from_number,
-                to=formatted_to
-            )
-            
-            logger.info(f"Sent WhatsApp message to {to_number}: {message.sid}")
-            return True
-            
+            parts = self._split_message(message)
+            all_ok = True
+            for idx, body in enumerate(parts, 1):
+                try:
+                    msg = self.client.messages.create(
+                        body=body,
+                        from_=self.from_number,
+                        to=formatted_to
+                    )
+                    logger.info(f"Sent WhatsApp message part {idx}/{len(parts)} to {to_number}: {msg.sid}")
+                except Exception as part_err:
+                    all_ok = False
+                    logger.error(f"Failed sending part {idx}/{len(parts)}: {part_err}")
+            return all_ok
         except Exception as e:
             logger.error(f"Failed to send WhatsApp message: {e}")
             return False
     
     async def send_message_with_media(self, to_number: str, message: str, media_url: str) -> bool:
-        """Send WhatsApp message with media attachment."""
+        """Send WhatsApp message with media; if body is long, attach media to first part only."""
         try:
             formatted_to = f"whatsapp:{to_number}"
-            
-            message = self.client.messages.create(
-                body=message,
-                from_=self.from_number,
-                to=formatted_to,
-                media_url=[media_url]
-            )
-            
-            logger.info(f"Sent WhatsApp message with media to {to_number}: {message.sid}")
-            return True
-            
+            parts = self._split_message(message)
+            all_ok = True
+            for idx, body in enumerate(parts, 1):
+                try:
+                    kwargs = {
+                        "body": body,
+                        "from_": self.from_number,
+                        "to": formatted_to,
+                    }
+                    if idx == 1 and media_url:
+                        kwargs["media_url"] = [media_url]
+                    msg = self.client.messages.create(**kwargs)
+                    logger.info(f"Sent WhatsApp media message part {idx}/{len(parts)} to {to_number}: {msg.sid}")
+                except Exception as part_err:
+                    all_ok = False
+                    logger.error(f"Failed sending media part {idx}/{len(parts)}: {part_err}")
+            return all_ok
         except Exception as e:
             logger.error(f"Failed to send WhatsApp message with media: {e}")
             return False
@@ -141,10 +197,12 @@ class TwilioService:
             return None
     
     def create_response(self, message: str) -> str:
-        """Create TwiML response for webhook."""
+        """Create TwiML response for webhook, chunking long messages into multiple <Message> nodes."""
         try:
             response = MessagingResponse()
-            response.message(message)
+            parts = self._split_message(message)
+            for part in parts:
+                response.message(part)
             return str(response)
         except Exception as e:
             logger.error(f"Error creating TwiML response: {e}")

@@ -106,68 +106,150 @@ class VisionAgent:
                 - Known allergies: {', '.join(allergies) if allergies else 'None reported'}
                 - Existing conditions: {', '.join(existing_conditions) if existing_conditions else 'None reported'}
                 """
-            
-            prompt = f"""
-            Analyze this skin condition image and provide a structured assessment with specific medication recommendations. 
-            {context}
-            
-            Please provide:
-            1. Visual description of the skin condition
-            2. Possible condition(s) it might indicate (with confidence levels)
-            3. Recommended immediate care steps with SPECIFIC medications, dosages, and application instructions
-            4. When to seek medical attention
-            5. General prevention advice
-            
-            For medication recommendations, include:
-            - Specific drug names (e.g., Hydrocortisone cream 1%, Cetirizine 10mg)
-            - Exact dosages and frequency
-            - Application instructions (e.g., "Apply thin layer twice daily after cleaning area")
-            - Duration of treatment
-            - Safety warnings (age restrictions, pregnancy warnings, etc.)
-            
-            Example format for medications:
-            "For itchy rash: Apply Hydrocortisone cream 1%, thin layer twice daily for up to 7 days. Take Cetirizine 10mg tablets, one tablet daily for allergic reactions."
-            
-            Important: 
-            - This is AI analysis only, not a medical diagnosis
-            - Always recommend consulting a dermatologist for definitive diagnosis
-            - Include specific medication safety warnings
-            - Focus on over-the-counter options primarily
-            - Be empathetic and reassuring
-            
-            Format as JSON with keys: description, possible_conditions, immediate_care, when_to_see_doctor, prevention, disclaimer
-            """
-            
-            response = await self.openai_client.chat.completions.create(
-                model="gpt-4o",
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": prompt},
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/jpeg;base64,{base64_image}",
-                                    "detail": "high"
-                                }
-                            }
-                        ]
-                    }
-                ],
-                max_tokens=1500,
-                temperature=0.3
+            # System message to steer the model away from refusals and towards safe, educational guidance
+            system_msg = (
+                "You are a dermatology information assistant. Provide non-diagnostic, educational analysis "
+                "of skin images with general guidance and over-the-counter options. Do not refuse; if uncertain, "
+                "express uncertainty and give general care advice, safety warnings, and when to see a doctor. "
+                "Always include a clear disclaimer that this is not a medical diagnosis. Return strictly JSON using the schema."
             )
-            
-            analysis_text = response.choices[0].message.content
-            
+
+            user_prompt = f"""
+            Review this skin image and provide a non-diagnostic, educational summary with practical self-care steps.
+            {context}
+
+            Return JSON with the following keys exactly:
+            - description: short visual description of what is visible (e.g., redness, scaling, circular patches)
+            - possible_conditions: array of objects {{name, confidence_percent, rationale}}
+            - immediate_care: array of items with fields {{issue, recommendation, medication, dosage, frequency, application, duration, warnings}}
+            - when_to_see_doctor: bullet list of red flags
+            - prevention: bullet list of general advice
+            - disclaimer: short safety statement (non-diagnostic, consult a dermatologist)
+
+            Rules:
+            - Educational only; do not claim diagnosis.
+            - Prefer over-the-counter options when possible.
+            - Include concrete examples, e.g., Hydrocortisone 1% cream (thin layer, 1-2x daily, up to 7 days), Cetirizine 10 mg (once daily),
+              Clotrimazole 1% cream (2x daily, 2-4 weeks if fungal features), Mupirocin 2% (3x daily if superficial bacterial signs),
+              gentle cleanser and moisturizer guidance, sunscreen usage, patch testing.
+            - Add pregnancy/children warnings and allergy considerations when relevant.
+            - Never return Markdown, only JSON.
+            """
+
+            async def call_model() -> str:
+                """Call model and return content string."""
+                try:
+                    # Try to enforce JSON output when supported
+                    return (await self.openai_client.chat.completions.create(
+                        model="gpt-4o",
+                        messages=[
+                            {"role": "system", "content": system_msg},
+                            {
+                                "role": "user",
+                                "content": [
+                                    {"type": "text", "text": user_prompt},
+                                    {
+                                        "type": "image_url",
+                                        "image_url": {
+                                            "url": f"data:image/jpeg;base64,{base64_image}",
+                                            "detail": "high"
+                                        }
+                                    }
+                                ]
+                            }
+                        ],
+                        max_tokens=1500,
+                        temperature=0.15,
+                        # Some models support JSON mode; ignore if unsupported
+                        response_format={"type": "json_object"}
+                    )).choices[0].message.content
+                except Exception as e:
+                    logger.warning(f"Primary JSON-mode call failed or unsupported: {e}")
+                    # Fallback without response_format
+                    return (await self.openai_client.chat.completions.create(
+                        model="gpt-4o",
+                        messages=[
+                            {"role": "system", "content": system_msg},
+                            {
+                                "role": "user",
+                                "content": [
+                                    {"type": "text", "text": user_prompt},
+                                    {
+                                        "type": "image_url",
+                                        "image_url": {
+                                            "url": f"data:image/jpeg;base64,{base64_image}",
+                                            "detail": "high"
+                                        }
+                                    }
+                                ]
+                            }
+                        ],
+                        max_tokens=1500,
+                        temperature=0.15
+                    )).choices[0].message.content
+
+            analysis_text = await call_model()
+
+            # If the model still refused, gently retry with a more constrained prompt
+            refusal_markers = [
+                "I can't assist", "I cannot assist", "can't help with that", "cannot help with that",
+                "not able to", "I'm sorry, I can't", "I’m sorry, I can’t"
+            ]
+            if any(m.lower() in (analysis_text or "").lower() for m in refusal_markers):
+                logger.info("Detected refusal; retrying with reinforced educational framing")
+                user_prompt_retry = (
+                    user_prompt
+                    + "\n\nImportant: Provide a neutral, educational summary and general over-the-counter self-care options with clear disclaimers."
+                )
+                try:
+                    analysis_text = (await self.openai_client.chat.completions.create(
+                        model="gpt-4o",
+                        messages=[
+                            {"role": "system", "content": system_msg},
+                            {
+                                "role": "user",
+                                "content": [
+                                    {"type": "text", "text": user_prompt_retry},
+                                    {
+                                        "type": "image_url",
+                                        "image_url": {"url": f"data:image/jpeg;base64,{base64_image}", "detail": "high"}
+                                    }
+                                ]
+                            }
+                        ],
+                        max_tokens=1500,
+                        temperature=0.1,
+                        response_format={"type": "json_object"}
+                    )).choices[0].message.content
+                except Exception as e:
+                    logger.warning(f"Retry JSON-mode call failed or unsupported: {e}")
+                    analysis_text = (await self.openai_client.chat.completions.create(
+                        model="gpt-4o",
+                        messages=[
+                            {"role": "system", "content": system_msg},
+                            {
+                                "role": "user",
+                                "content": [
+                                    {"type": "text", "text": user_prompt_retry},
+                                    {
+                                        "type": "image_url",
+                                        "image_url": {"url": f"data:image/jpeg;base64,{base64_image}", "detail": "high"}
+                                    }
+                                ]
+                            }
+                        ],
+                        max_tokens=1500,
+                        temperature=0.1
+                    )).choices[0].message.content
+
             # Try to parse as JSON, fallback to structured text
             try:
                 import json
                 analysis = json.loads(analysis_text)
-            except:
+            except Exception as parse_err:
+                logger.warning(f"Failed to parse analysis as JSON, returning raw: {parse_err}")
                 analysis = {
-                    "description": "Analysis completed",
+                    "description": "Educational analysis completed",
                     "analysis_text": analysis_text,
                     "raw_response": True
                 }
