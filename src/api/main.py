@@ -17,6 +17,9 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 import logging
 from contextlib import asynccontextmanager
 from typing import Dict, Any, Optional, List
+import os
+from PyPDF2 import PdfReader  # type: ignore
+import docx  # type: ignore
 import asyncio
 from datetime import datetime
 
@@ -32,6 +35,7 @@ from src.agents.vision_agent import VisionAgent
 from src.utils.safety_validator import MedicalSafetyValidator
 from src.models.schemas import WhatsAppMessage, HealthcareResponse
 from openai import AsyncOpenAI
+from src.services.pinecone_service import pinecone_service
 
 # Configure logging
 logging.basicConfig(
@@ -74,6 +78,16 @@ async def process_basic_health_query(user_id: str, query: str) -> str:
 async def process_health_query_english(user_id: str, query: str) -> str:
     """Process basic health queries with simple responses."""
     query_lower = query.lower()
+
+    # Try RAG first if user has uploaded reports/documents
+    try:
+        # Only attempt if Pinecone is initialized
+        if getattr(pinecone_service, 'index', None) is not None:
+            user_hits = await pinecone_service.search_user_documents(query=query, user_id=user_id, top_k=3)
+            if user_hits:
+                return await generate_rag_answer(user_id, query, user_hits)
+    except Exception as e:
+        logger.warning(f"RAG lookup failed or unavailable, falling back to heuristics: {e}")
     
     # Check for common health concerns
     if 'headache' in query_lower:
@@ -208,13 +222,76 @@ async def generate_medical_answer_english(query: str) -> str:
         temperature=0.2,
         max_tokens=700,
     )
-    text = resp.choices[0].message.content.strip()
+    msg_content = resp.choices[0].message.content or ""
+    text = msg_content.strip()
 
     # Append a standard disclaimer if model omitted it
     if "Important" not in text and "disclaimer" not in text.lower():
         text += (
             "\n\n⚠️ **Important:** This is general health information and not a substitute for professional medical advice. "
             "See a healthcare professional for diagnosis and treatment."
+        )
+    return text
+
+async def generate_rag_answer(user_id: str, query: str, user_hits: Optional[List[Dict[str, Any]]] = None) -> str:
+    """Generate an answer grounded in the user's uploaded medical documents with healthcare knowledge as backup."""
+    global openai_client, settings
+    if not openai_client and getattr(settings, 'openai_api_key', None):
+        try:
+            from openai import AsyncOpenAI as _AsyncOpenAI
+            openai_client = _AsyncOpenAI(api_key=settings.openai_api_key)
+            logger.info("Initialized OpenAI client lazily for RAG")
+        except Exception as e:
+            logger.warning(f"Failed lazy OpenAI init (RAG): {e}")
+    if not openai_client:
+        raise RuntimeError("OpenAI client is not initialized")
+
+    # Retrieve general healthcare knowledge for additional context
+    general_hits: List[Dict[str, Any]] = []
+    try:
+        general_hits = await pinecone_service.search_healthcare_knowledge(query=query, top_k=3)
+    except Exception as e:
+        logger.warning(f"Healthcare knowledge retrieval failed: {e}")
+
+    # Build context blocks with identifiers
+    def trim(txt: str, limit: int = 1600) -> str:
+        return (txt or "")[:limit]
+
+    user_hits = user_hits or []
+    contexts = []
+    for i, h in enumerate(user_hits[:3]):
+        contexts.append(f"[R{i+1}]\nType: {h.get('document_type','unknown')}\nDate: {h.get('date','')}\nContent:\n{trim(h.get('content',''))}")
+    for j, h in enumerate(general_hits[:3]):
+        contexts.append(f"[K{j+1}]\nTitle: {h.get('title','')}\nSource: {h.get('source','')}\nContent:\n{trim(h.get('content',''))}")
+
+    system_msg = (
+        "You are a careful, helpful medical assistant. Answer the user's question using ONLY the provided context blocks. "
+        "Prioritize [R#] user report content. If a specific detail is not in the context, say you don't have enough information. "
+        "Provide concise bullets: findings, what they mean, medication recommendations with dosage/frequency/duration when appropriate, "
+        "self-care, and when to see a doctor. If recommending prescription meds, note that a doctor's prescription is required. "
+        "Always include a brief safety disclaimer at the end. Keep WhatsApp-friendly length."
+    )
+
+    context_blob = "\n\n".join(contexts) if contexts else "[No context available]"
+    user_prompt = (
+        f"User ID: {user_id}\nQuestion: {query}\n\nContext blocks (cite like [R1], [K1]):\n{context_blob}\n\n"
+        "Compose the answer now. Use citations inline like [R1] for claims tied to the user's report, and [K1] for general knowledge."
+    )
+
+    resp = await openai_client.chat.completions.create(
+        model=getattr(settings, 'gpt_model', 'gpt-4o-mini'),
+        messages=[
+            {"role": "system", "content": system_msg},
+            {"role": "user", "content": user_prompt},
+        ],
+        temperature=0.2,
+        max_tokens=700,
+    )
+    text = (resp.choices[0].message.content or "").strip()
+    if "Important" not in text and "disclaimer" not in text.lower():
+        text += (
+            "\n\n⚠️ Important: Educational guidance only, not a diagnosis. "
+            "Consult a healthcare professional for personalized medical advice."
         )
     return text
 
@@ -337,7 +414,7 @@ def format_image_analysis_response(analysis_result: Dict[str, Any]) -> str:
     # Immediate care with specific medications
     if "immediate_care" in analysis_result:
         care_items = safe_get_list(analysis_result.get("immediate_care"))[:4]
-        lines: List[str] = []
+        care_lines: List[str] = []
         for it in care_items:
             if isinstance(it, dict):
                 issue = it.get("issue")
@@ -368,11 +445,11 @@ def format_image_analysis_response(analysis_result: Dict[str, Any]) -> str:
                     line.append(f" (Duration: {dur})")
                 if warn:
                     line.append(f" [Warnings: {warn}]")
-                lines.append(" ".join(part for part in line if part))
+                care_lines.append(" ".join(part for part in line if part))
             else:
-                lines.append(str(it))
-        if lines:
-            response += "🏠 **Immediate care & medications:**\n" + bullets(lines) + "\n"
+                care_lines.append(str(it))
+        if care_lines:
+            response += "🏠 **Immediate care & medications:**\n" + bullets(care_lines) + "\n"
     else:
         # Add general medication suggestions for skin conditions
         response += """🏠 **General care & medications:**
@@ -439,7 +516,7 @@ onboarding_service: Optional[OnboardingService] = None
 safety_validator: Optional[MedicalSafetyValidator] = None
 language_processor: Optional[LanguageProcessor] = None
 vision_agent: Optional[VisionAgent] = None
-settings: Settings = Settings()
+settings: Settings = Settings()  # type: ignore[call-arg]
 openai_client: Optional[AsyncOpenAI] = None
 
 @asynccontextmanager
@@ -483,7 +560,7 @@ async def lifespan(app: FastAPI):
             logger.error(f"Failed to initialize OpenAI client: {e}")
             openai_client = None
         
-        # Initialize safety validator
+    # Initialize safety validator
         safety_validator = MedicalSafetyValidator()
         logger.info("✅ Safety validator initialized")
         
@@ -498,6 +575,16 @@ async def lifespan(app: FastAPI):
         # Initialize query processor
         query_processor = QueryProcessor(onboarding_service)
         logger.info("✅ Query processor initialized")
+
+        # Initialize Pinecone (vector DB) for RAG and load default knowledge
+        try:
+            await pinecone_service.initialize()
+            logger.info("✅ Pinecone service initialized")
+            # Optionally seed default healthcare knowledge once
+            await pinecone_service.initialize_default_healthcare_knowledge()
+            logger.info("✅ Default healthcare knowledge initialized")
+        except Exception as e:
+            logger.warning(f"Pinecone initialization failed or unavailable: {e}")
         
         logger.info("🚀 Healthcare Chatbot is ready to serve!")
         
@@ -629,7 +716,8 @@ async def health_check():
             "onboarding": onboarding_service is not None,
             "safety_validator": safety_validator is not None,
             "language_processor": language_processor is not None,
-            "vision_agent": vision_agent is not None
+            "vision_agent": vision_agent is not None,
+            "pinecone": getattr(pinecone_service, 'index', None) is not None
         }
     }
     
@@ -643,6 +731,14 @@ async def health_check():
             logger.error(f"Health check database error: {e}")
             health_status["services"]["database_error"] = str(e)
     
+    # Add Pinecone stats if available
+    try:
+        if getattr(pinecone_service, 'index', None) is not None:
+            stats = await pinecone_service.get_index_stats()
+            health_status["pinecone_stats"] = stats
+    except Exception as e:
+        logger.warning(f"Pinecone stats retrieval failed: {e}")
+
     # Determine overall health
     all_services_ok = all(health_status["services"].values())
     if not all_services_ok:
@@ -739,30 +835,33 @@ async def process_whatsapp_message(
         else:
             # User profile is complete - process normally
             if has_media:
-                # Process image upload
-                logger.info(f"🖼️ Processing image from {phone_number}")
-                
-                # Get user context for better analysis
-                user_context = {
-                    'age': user_profile.age,
-                    'gender': user_profile.gender.value if user_profile.gender else None,
-                    'allergies': user_profile.allergies,
-                    'existing_conditions': user_profile.existing_conditions
-                } if user_profile else None
-                
-                # Determine image type from message text if provided
-                image_type = "skin"  # Default to skin analysis
-                if message_text:
-                    text_lower = message_text.lower()
-                    if any(word in text_lower for word in ['skin', 'rash', 'spot', 'itch', 'bump', 'mole', 'acne']):
-                        image_type = "skin"
-                    elif any(word in text_lower for word in ['wound', 'cut', 'injury']):
-                        image_type = "wound"
-                    elif any(word in text_lower for word in ['lab', 'report', 'test', 'result']):
-                        image_type = "lab_report"
-                
-                response_text = await process_image_analysis(phone_number, message.MediaUrl0 or "", image_type, user_context)
-                response = type('Response', (), {'message': response_text, 'media_url': None})()
+                # Route based on content type (image vs document)
+                ctype = (message.MediaContentType0 or "").lower()
+                if ctype.startswith("image/"):
+                    logger.info(f"🖼️ Processing image from {phone_number}")
+                    user_context = {
+                        'age': user_profile.age,
+                        'gender': user_profile.gender.value if user_profile.gender else None,
+                        'allergies': user_profile.allergies,
+                        'existing_conditions': user_profile.existing_conditions
+                    } if user_profile else None
+                    image_type = "skin"
+                    if message_text:
+                        text_lower = message_text.lower()
+                        if any(word in text_lower for word in ['skin', 'rash', 'spot', 'itch', 'bump', 'mole', 'acne']):
+                            image_type = "skin"
+                        elif any(word in text_lower for word in ['wound', 'cut', 'injury']):
+                            image_type = "wound"
+                        elif any(word in text_lower for word in ['lab', 'report', 'test', 'result']):
+                            image_type = "lab_report"
+                    response_text = await process_image_analysis(phone_number, message.MediaUrl0 or "", image_type, user_context)
+                    response = type('Response', (), {'message': response_text, 'media_url': None})()
+                elif ctype in ("application/pdf", "application/msword", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"):
+                    logger.info(f"📄 Processing document from {phone_number} ({ctype})")
+                    response_text = await process_document_ingestion(phone_number, message.MediaUrl0 or "", ctype, message_text)
+                    response = type('Response', (), {'message': response_text, 'media_url': None})()
+                else:
+                    response = type('Response', (), {'message': "Unsupported media type. Please send an image (JPG/PNG) or PDF report.", 'media_url': None})()
             else:
                 # Process text-based health query
                 response_text = await process_basic_health_query(phone_number, message_text)
@@ -800,6 +899,152 @@ async def process_whatsapp_message(
             )
         except Exception as send_error:
             logger.error(f"Failed to send error message: {send_error}")
+
+async def process_document_ingestion(user_id: str, media_url: str, content_type: str, message_text: str = "") -> str:
+    """Download, extract, and index a medical document for RAG. Supports image-based reports; PDFs are acknowledged with limited support."""
+    global twilio_service, vision_agent
+    try:
+        if not twilio_service:
+            return "❌ Service error: unable to download document right now. Please try again later."
+
+        # Download file
+        file_path = await twilio_service.download_media(media_url, user_id)
+        if not file_path:
+            return "❌ Download failed. Please send the document again."
+
+        # Normalize file extension based on content type for reliable validation/extraction
+        try:
+            desired_ext = None
+            ct = (content_type or "").lower()
+            if ct == "application/pdf":
+                desired_ext = ".pdf"
+            elif ct == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+                desired_ext = ".docx"
+            elif ct == "application/msword":
+                desired_ext = ".doc"
+            if desired_ext:
+                base, ext = os.path.splitext(file_path)
+                if ext.lower() != desired_ext:
+                    new_path = base + desired_ext
+                    try:
+                        os.replace(file_path, new_path)
+                        file_path = new_path
+                    except Exception as ren_err:
+                        logger.warning(f"Could not rename file to match content type: {ren_err}")
+        except Exception as _e:
+            logger.debug(f"Extension normalization skipped: {_e}")
+
+        # Validate
+        validation = await twilio_service.validate_file_upload(file_path, content_type or "")
+        if not validation.get("valid"):
+            return f"❌ {validation.get('error','Invalid file')} Please upload a valid document (PDF, DOC/DOCX, or a clear image of the report)."
+
+        # Detect document type from user text
+        doc_type = "medical_report"
+        t = (message_text or "").lower()
+        if any(w in t for w in ["lab", "test", "result", "cbc", "platelet", "haemoglobin", "hemoglobin"]):
+            doc_type = "lab_report"
+        elif any(w in t for w in ["prescription", "rx", "medication", "medicines"]):
+            doc_type = "prescription"
+
+        extracted_text = ""
+        metadata: Dict[str, Any] = {"source": "whatsapp", "content_type": content_type, "file_name": os.path.basename(file_path)}
+
+        if content_type.startswith("image/"):
+            # Use vision agent to parse the document image
+            if not vision_agent:
+                return "📄 Document received, but analysis service is unavailable. I'll store it and you can ask questions about it later."
+            parsed = await vision_agent.parse_medical_document(file_path, doc_type)
+            # Flatten structured data into a text blob for embeddings
+            try:
+                import json
+                if parsed.get("structured") is False and parsed.get("raw_text"):
+                    extracted_text = str(parsed.get("raw_text") or "")
+                else:
+                    # Keep a concise, readable summary
+                    extracted_text = json.dumps(parsed, ensure_ascii=False)
+            except Exception:
+                extracted_text = str(parsed)
+        elif content_type == "application/pdf":
+            # Extract text from PDF (works for digital PDFs; scanned PDFs may be empty)
+            extracted_text = _extract_text_from_pdf(file_path)
+            if not extracted_text.strip():
+                metadata["extraction"] = "pdf_scan_likely_no_text"
+                extracted_text = (
+                    "This appears to be a scanned PDF with no extractable text. "
+                    "Please send a clear photo of the report pages for best results."
+                )
+        elif content_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+            # DOCX support
+            extracted_text = _extract_text_from_docx(file_path)
+            if not extracted_text.strip():
+                metadata["extraction"] = "docx_empty"
+                extracted_text = (
+                    "Couldn't extract text from the DOCX file. Please verify the document or send a PDF/image."
+                )
+        elif content_type == "application/msword":
+            # Legacy .doc is not well-supported by python-docx
+            metadata["extraction"] = "doc_legacy_limited"
+            extracted_text = (
+                "You uploaded a legacy .doc file. Text extraction is limited. "
+                "Please convert it to PDF/DOCX or send a clear image of the pages."
+            )
+        else:
+            metadata["extraction"] = "unsupported"
+            extracted_text = "Unsupported document type. Please send PDF, DOCX, or a clear image of the report."
+
+        # Upsert into Pinecone under user's namespace
+        try:
+            ok = await pinecone_service.upsert_user_document(user_id=user_id, document_content=extracted_text, document_type=doc_type, metadata=metadata)
+        except Exception as e:
+            logger.error(f"Failed to upsert user document: {e}")
+            ok = False
+
+        if ok:
+            return (
+                "📄 Document processed successfully!\n\n"
+                "I extracted the key details and indexed them so I can answer questions about this report. "
+                "You can ask things like:\n"
+                "• Summarize my report and key findings\n"
+                "• Recommend medicines based on this report\n"
+                "• Are any values abnormal and what should I do?\n\n"
+                "⚠️ AI assistance only — not a medical diagnosis. Please consult a doctor for confirmation."
+            )
+        else:
+            return (
+                "⚠️ I received your document but couldn't index it for search. You can still ask questions, "
+                "but replies may be generic. Try sending a clear photo of the report’s key pages."
+            )
+    except Exception as e:
+        logger.error(f"Error in document ingestion: {e}")
+        return "Sorry, I had trouble processing your document. Please try again or consult a healthcare professional."
+
+def _extract_text_from_pdf(file_path: str) -> str:
+    """Extract text from a PDF using PyPDF2. Scanned PDFs may return empty text."""
+    try:
+        reader = PdfReader(file_path)
+        parts: List[str] = []
+        for page in reader.pages:
+            try:
+                txt = page.extract_text() or ""
+                if txt:
+                    parts.append(txt)
+            except Exception as _:
+                continue
+        return "\n\n".join(parts)
+    except Exception as e:
+        logger.warning(f"PDF extraction failed: {e}")
+        return ""
+
+def _extract_text_from_docx(file_path: str) -> str:
+    """Extract text from a DOCX file using python-docx."""
+    try:
+        d = docx.Document(file_path)
+        paras = [p.text for p in d.paragraphs if p.text]
+        return "\n".join(paras)
+    except Exception as e:
+        logger.warning(f"DOCX extraction failed: {e}")
+        return ""
 
 @app.post("/api/send-message")
 async def send_message_api(

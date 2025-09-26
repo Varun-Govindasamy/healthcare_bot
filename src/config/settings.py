@@ -42,6 +42,9 @@ class Settings(BaseSettings):
     # Pinecone Configuration
     pinecone_api_key: str
     pinecone_environment: str
+    # Optional: explicit cloud provider for Pinecone serverless ('aws' or 'gcp').
+    # If not set, code will infer from pinecone_environment (e.g., 'us-east-1-aws').
+    pinecone_cloud: Optional[str] = None
     pinecone_index_name: str = "healthcare-bot-index"
     
     # Twilio Configuration

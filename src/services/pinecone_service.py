@@ -3,7 +3,7 @@ Pinecone vector database service for healthcare knowledge and user documents.
 """
 import logging
 from typing import List, Dict, Any, Optional
-import pinecone
+from pinecone import Pinecone, ServerlessSpec  # v3 client
 from openai import AsyncOpenAI
 import hashlib
 import json
@@ -19,6 +19,7 @@ class PineconeService:
     
     def __init__(self):
         self.openai_client = AsyncOpenAI(api_key=settings.openai_api_key)
+        self.client: Optional[Pinecone] = None
         self.index = None
         self.embedding_model = "text-embedding-3-large"
         self.dimension = 3072  # Dimension for text-embedding-3-large
@@ -30,31 +31,59 @@ class PineconeService:
     async def initialize(self):
         """Initialize Pinecone connection and index."""
         try:
-            # Initialize Pinecone
-            pinecone.init(
-                api_key=settings.pinecone_api_key,
-                environment=settings.pinecone_environment
-            )
-            
-            # Check if index exists, create if not
-            if settings.pinecone_index_name not in pinecone.list_indexes():
-                pinecone.create_index(
+            # Initialize Pinecone v3 client
+            self.client = Pinecone(api_key=settings.pinecone_api_key)
+
+            # Determine region/cloud; PINECONE_ENVIRONMENT can be like 'us-east-1-aws'
+            raw_env = (getattr(settings, 'pinecone_environment', '') or '').strip()
+            region = raw_env
+            cloud = getattr(settings, 'pinecone_cloud', None) or 'aws'
+            if raw_env and '-' in raw_env:
+                # Try to split 'us-east-1-aws' into ('us-east-1', 'aws')
+                parts = raw_env.split('-')
+                if len(parts) >= 3:
+                    candidate_cloud = parts[-1]
+                    candidate_region = '-'.join(parts[:-1])
+                    if candidate_cloud in ('aws', 'gcp'):
+                        cloud = getattr(settings, 'pinecone_cloud', None) or candidate_cloud
+                        region = candidate_region
+            if not region:
+                region = 'us-east-1'
+
+            # Create index if it doesn't exist
+            try:
+                existing = [ix.name for ix in self.client.list_indexes()]
+            except Exception as e_list:
+                logger.warning(f"Could not list Pinecone indexes: {e_list}")
+                existing = []
+
+            if settings.pinecone_index_name not in existing:
+                self.client.create_index(
                     name=settings.pinecone_index_name,
                     dimension=self.dimension,
                     metric="cosine",
-                    metadata_config={
-                        "indexed": ["document_type", "user_id", "source", "date"]
-                    }
+                    spec=ServerlessSpec(cloud=cloud, region=region)
                 )
-                logger.info(f"Created Pinecone index: {settings.pinecone_index_name}")
-            
+                logger.info(f"Created Pinecone index: {settings.pinecone_index_name} in {cloud}/{region}")
+
             # Connect to index
-            self.index = pinecone.Index(settings.pinecone_index_name)
-            logger.info("Successfully connected to Pinecone")
+            self.index = self.client.Index(settings.pinecone_index_name)
+            logger.info("Successfully connected to Pinecone index")
             
         except Exception as e:
             logger.error(f"Failed to initialize Pinecone: {e}")
             raise
+
+    async def _ensure_initialized(self) -> bool:
+        """Ensure Pinecone index is initialized before operations."""
+        if self.index is not None:
+            return True
+        try:
+            await self.initialize()
+            return self.index is not None
+        except Exception as e:
+            logger.warning(f"Pinecone not available: {e}")
+            return False
     
     async def generate_embedding(self, text: str) -> List[float]:
         """Generate embedding for text using OpenAI."""
@@ -71,6 +100,9 @@ class PineconeService:
     async def upsert_healthcare_knowledge(self, documents: List[Dict[str, Any]]) -> bool:
         """Upsert healthcare knowledge documents."""
         try:
+            if not await self._ensure_initialized():
+                logger.warning("Skipping healthcare knowledge upsert: Pinecone unavailable")
+                return False
             vectors = []
             
             for doc in documents:
@@ -105,10 +137,11 @@ class PineconeService:
             batch_size = 100
             for i in range(0, len(vectors), batch_size):
                 batch = vectors[i:i + batch_size]
-                self.index.upsert(
-                    vectors=batch,
-                    namespace=self.healthcare_namespace
-                )
+                if self.index is not None:
+                    self.index.upsert(
+                        vectors=batch,
+                        namespace=self.healthcare_namespace
+                    )
             
             logger.info(f"Upserted {len(vectors)} healthcare documents")
             return True
@@ -121,6 +154,9 @@ class PineconeService:
                                   document_type: str, metadata: Optional[Dict[str, Any]] = None) -> bool:
         """Upsert user-specific document."""
         try:
+            if not await self._ensure_initialized():
+                logger.warning("Skipping user document upsert: Pinecone unavailable")
+                return False
             # Generate embedding
             embedding = await self.generate_embedding(document_content)
             if not embedding:
@@ -141,14 +177,15 @@ class PineconeService:
                 doc_metadata.update(metadata)
             
             # Upsert vector
-            self.index.upsert(
-                vectors=[{
-                    "id": vector_id,
-                    "values": embedding,
-                    "metadata": doc_metadata
-                }],
-                namespace=f"{self.user_documents_namespace}_{user_id}"
-            )
+            if self.index is not None:
+                self.index.upsert(
+                    vectors=[{
+                        "id": vector_id,
+                        "values": embedding,
+                        "metadata": doc_metadata
+                    }],
+                    namespace=f"{self.user_documents_namespace}_{user_id}"
+                )
             
             logger.info(f"Upserted user document for {user_id}")
             return True
@@ -161,19 +198,24 @@ class PineconeService:
                                         filter_metadata: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         """Search healthcare knowledge base."""
         try:
+            if not await self._ensure_initialized():
+                logger.warning("Skipping healthcare knowledge search: Pinecone unavailable")
+                return []
             # Generate query embedding
             query_embedding = await self.generate_embedding(query)
             if not query_embedding:
                 return []
             
             # Perform search
-            search_results = self.index.query(
-                vector=query_embedding,
-                top_k=top_k,
-                namespace=self.healthcare_namespace,
-                filter=filter_metadata,
-                include_metadata=True
-            )
+            kwargs = {
+                'vector': query_embedding,
+                'top_k': top_k,
+                'namespace': self.healthcare_namespace,
+                'include_metadata': True,
+            }
+            if filter_metadata:
+                kwargs['filter'] = filter_metadata
+            search_results = self.index.query(**kwargs)
             
             # Format results
             results = []
@@ -199,6 +241,9 @@ class PineconeService:
     async def search_user_documents(self, query: str, user_id: str, top_k: int = 3) -> List[Dict[str, Any]]:
         """Search user-specific documents."""
         try:
+            if not await self._ensure_initialized():
+                logger.warning("Skipping user documents search: Pinecone unavailable")
+                return []
             # Generate query embedding
             query_embedding = await self.generate_embedding(query)
             if not query_embedding:
@@ -234,8 +279,12 @@ class PineconeService:
     async def delete_user_documents(self, user_id: str) -> bool:
         """Delete all documents for a user."""
         try:
+            if not await self._ensure_initialized():
+                logger.warning("Skipping delete: Pinecone unavailable")
+                return False
             # Delete entire user namespace
-            self.index.delete(delete_all=True, namespace=f"{self.user_documents_namespace}_{user_id}")
+            if self.index is not None:
+                self.index.delete(delete_all=True, namespace=f"{self.user_documents_namespace}_{user_id}")
             logger.info(f"Deleted all documents for user {user_id}")
             return True
             
@@ -246,11 +295,22 @@ class PineconeService:
     async def get_index_stats(self) -> Dict[str, Any]:
         """Get index statistics."""
         try:
+            if not await self._ensure_initialized() or self.index is None:
+                return {}
             stats = self.index.describe_index_stats()
+            # v3 returns dict-like structure
+            try:
+                total_vectors = stats.get('total_vector_count') if isinstance(stats, dict) else stats.total_vector_count
+                namespaces = stats.get('namespaces') if isinstance(stats, dict) else stats.namespaces
+                dimension = stats.get('dimension') if isinstance(stats, dict) else getattr(stats, 'dimension', self.dimension)
+            except Exception:
+                total_vectors = None
+                namespaces = None
+                dimension = self.dimension
             return {
-                "total_vectors": stats.total_vector_count,
-                "namespaces": stats.namespaces,
-                "dimension": stats.dimension
+                "total_vectors": total_vectors,
+                "namespaces": namespaces,
+                "dimension": dimension
             }
         except Exception as e:
             logger.error(f"Failed to get index stats: {e}")

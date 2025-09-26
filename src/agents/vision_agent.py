@@ -255,7 +255,8 @@ class VisionAgent:
                 }
             
             analysis["image_analyzed"] = True
-            analysis["analysis_timestamp"] = logger.info("Vision analysis completed for skin condition")
+            analysis["analysis_timestamp"] = __import__('datetime').datetime.utcnow().isoformat()
+            logger.info("Vision analysis completed for skin condition")
             
             return analysis
             
@@ -335,7 +336,8 @@ class VisionAgent:
                 }
             
             extracted_data["document_type"] = document_type
-            extracted_data["extraction_timestamp"] = logger.info("Document extraction completed")
+            extracted_data["extraction_timestamp"] = __import__('datetime').datetime.utcnow().isoformat()
+            logger.info("Document extraction completed")
             
             return extracted_data
             
